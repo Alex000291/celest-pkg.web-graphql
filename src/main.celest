@@ -1,0 +1,462 @@
+import "web-core" as web;
+import "std:GraphQL";
+import "std:Object";
+
+export function error(message, path, locations, extensions) {
+    byte[8] value = new Object();
+    value.kind = 0x47514C31;
+    value.message = message;
+    value.path = path;
+    value.locations = locations;
+    value.extensions = extensions;
+    return (Object)value;
+}
+
+function isGraphQLError(value) {
+    if (Object.is_object(value) == 0) return 0;
+    if (Object.address(value, "kind") == 0) return 0;
+    return value.kind == 0x47514C31;
+}
+
+function Schema() {
+    this.queryFields = new Object();
+    this.mutationFields = new Object();
+    this.subscriptionFields = new Object();
+    return;
+}
+
+function schemaQuery(name, resolver) {
+    Object.set(this.queryFields, name, resolver);
+    return this;
+}
+
+function schemaMutation(name, resolver) {
+    Object.set(this.mutationFields, name, resolver);
+    return this;
+}
+
+function schemaSubscription(name, resolver) {
+    Object.set(this.subscriptionFields, name, resolver);
+    return this;
+}
+
+function Selection(name, alias, arguments, children) {
+    this.name = name;
+    this.alias = alias;
+    this.arguments = arguments;
+    this.children = children;
+    this.next = 0;
+    this.directives = new Object();
+    return;
+}
+
+function ParsedDocument(operation) {
+    this.operation = operation;
+    this.fields = 0;
+    this.variables = new Object();
+    this.next = 0;
+    this.nativeDocument = 0;
+    this.fieldCount = 0;
+    return;
+}
+
+function selectionNext(value) {
+    this.next = value;
+    return value;
+}
+
+function initializePrototypes() {
+    byte[8] schemaPrototype = new Object();
+    schemaPrototype.query = (Function)schemaQuery;
+    schemaPrototype.mutation = (Function)schemaMutation;
+    schemaPrototype.subscription = (Function)schemaSubscription;
+    Schema.prototype = (Object)schemaPrototype;
+
+    byte[8] selectionPrototype = new Object();
+    selectionPrototype.then = (Function)selectionNext;
+    Selection.prototype = (Object)selectionPrototype;
+
+
+
+    return 1;
+}
+
+byte[1] prototypesInitialized = initializePrototypes();
+
+export function schema() {
+    return new Schema();
+}
+
+export function selection(name, alias, arguments, children) {
+    return new Selection(name, alias, arguments, children);
+}
+
+export function document(operation, fields, variables) {
+    byte[8] value = new Object();
+    value.operation = operation;
+    value.fields = fields;
+    value.variables = variables;
+    value.next = 0;
+    return (Object)value;
+}
+
+byte[8] resolveSelections = function(resolvers, fields, parent, context, variables) {
+    byte[8] data = new Object();
+    byte[8] field = fields;
+    while (field != 0) {
+        byte[8] resolver = Object.get(resolvers, field.name);
+        if (resolver == 0) throw "unknown GraphQL field";
+        byte[8] info = new Object();
+        byte[8] work = new Object();
+        info.name = field.name;
+        info.variables = variables;
+        work.result = resolver(parent, field.arguments, context, (Object)info);
+        if (field.children != 0) {
+            work.result = resolveSelections(work.result.resolvers, field.children, work.result.value, context, variables);
+        }
+        if (field.alias == 0) {
+            Object.set(data, field.name, work.result);
+        } else {
+            Object.set(data, field.alias, work.result);
+        }
+        field = field.next;
+    }
+    return (Object)data;
+};
+
+byte[8] resolveNativeSelections = function(resolvers, nativeDocument, fieldCount, parentIndex, parent, context, variables) {
+    byte[8] scopes = new Object();
+    byte[8] rootScope = new Object();
+    rootScope.data = new Object();
+    rootScope.resolvers = (Object)resolvers;
+    rootScope.parent = parent;
+    byte[8] rootIndex = 0;
+    Object.set(scopes, rootIndex, (Object)rootScope);
+    byte[8] index = 0;
+    while (index < fieldCount) {
+        byte[8] item = new Object();
+        byte[8] fieldParent = GraphQL.field_parent(nativeDocument, index);
+        item.scope = Object.get(scopes, fieldParent);
+        if (item.scope == 0) throw "invalid GraphQL selection parent";
+        item.name = GraphQL.field_name(nativeDocument, index, 0);
+        item.alias = GraphQL.field_name(nativeDocument, index, 1);
+        item.resolver = Object.get(item.scope.resolvers, item.name);
+        if (item.resolver == 0) throw "unknown GraphQL field";
+        byte[8] arguments = new Object();
+        byte[8] argumentCount = GraphQL.argument_count(nativeDocument, index);
+        byte[8] argumentIndex = 0;
+        while (argumentIndex < argumentCount) {
+            byte[8] argument = new Object();
+            argument.name = GraphQL.argument(nativeDocument, index, argumentIndex, 0);
+            argument.variableName = GraphQL.argument(nativeDocument, index, argumentIndex, 2);
+            if (argument.variableName == 0) argument.value = GraphQL.argument(nativeDocument, index, argumentIndex, 1);
+            else {
+                argument.value = Object.get(variables, argument.variableName);
+            }
+            Object.set(arguments, argument.name, argument.value);
+            argumentIndex = argumentIndex + 1;
+        }
+        byte[8] info = new Object();
+        info.name = item.name;
+        info.variables = variables;
+        byte[8] resolver = item.resolver;
+        item.result = resolver(item.scope.parent, (Object)arguments, context, (Object)info);
+        byte[8] childParent = index + 1;
+        byte[8] childIndex = index + 1;
+        byte[8] hasChildren = 0;
+        while (childIndex < fieldCount) {
+            byte[8] candidateParent = GraphQL.field_parent(nativeDocument, childIndex);
+            if (candidateParent == childParent) hasChildren = 1;
+            childIndex = childIndex + 1;
+        }
+        if (hasChildren != 0) {
+            byte[8] childScope = new Object();
+            childScope.data = new Object();
+            byte[8] childResolvers = item.result.resolvers;
+            byte[8] childValue = item.result.value;
+            childScope.resolvers = (Object)childResolvers;
+            childScope.parent = (Object)childValue;
+            Object.set(scopes, childParent, (Object)childScope);
+            byte[8] childData = childScope.data;
+            item.result = (Object)childData;
+        }
+        if (item.alias == 0) Object.set(item.scope.data, item.name, item.result);
+        else Object.set(item.scope.data, item.alias, item.result);
+        index = index + 1;
+    }
+    byte[8] output = rootScope.data;
+    return (Object)output;
+};
+export function execute(schema, document, context) {
+    byte[8] result = new Object();
+    byte[8] resolvers = schema.queryFields;
+    if (document.operation == "mutation") resolvers = schema.mutationFields;
+    if (document.operation == "subscription") resolvers = schema.subscriptionFields;
+    if (document.nativeDocument == 0) result.data = resolveSelections(resolvers, document.fields, 0, context, document.variables);
+    else {
+        byte[32] nativeDocument = document.nativeDocument;
+        byte[8] fieldCount = document.fieldCount;
+        result.data = resolveNativeSelections(resolvers, nativeDocument, fieldCount, 0, 0,
+                                              context, (Object)document.variables);
+    }
+    return (Object)result;
+}
+
+function BatchResult(value) {
+    this.value = value;
+    this.next = 0;
+    return;
+}
+
+function executeBatch(schema, document, context) {
+    if (document == 0) return 0;
+    byte[8] result = new BatchResult(execute(schema, document, context));
+    if (document.next != 0) result.next = executeBatch(schema, (Object)document.next, context);
+    return (Object)result;
+}
+
+export function batch(schema, documents, context) {
+    return executeBatch(schema, documents, context);
+}
+
+export function persisted(resolve, key, document) {
+    if (document == 0) return resolve(key, 0);
+    resolve(key, document);
+    return document;
+}
+
+export function introspect(schema) {
+    byte[8] result = new Object();
+    result.query = schema.queryFields;
+    result.mutation = schema.mutationFields;
+    result.subscription = schema.subscriptionFields;
+    return (Object)result;
+}
+
+export function limited(maximum, measure, schema, document, context) {
+    if (measure(document) > maximum) throw "GraphQL query is too complex";
+    return execute(schema, document, context);
+}
+
+export function parse(source) {
+    byte[32] nativeDocument = GraphQL.parse(source);
+    byte[8] value = new ParsedDocument(GraphQL.operation(nativeDocument));
+    value.nativeDocument = nativeDocument;
+    value.fieldCount = GraphQL.field_count(nativeDocument);
+    return (Object)value;
+}
+
+export function close(document) {
+    if (document.nativeDocument != 0) {
+        GraphQL.close(document.nativeDocument);
+        document.nativeDocument = 0;
+        document.fieldCount = 0;
+    }
+    return 1;
+}
+
+export function validate(schema, document, validator) {
+    return validator(schema, document);
+}
+
+export function subscribe(schema, document, context, publish) {
+    byte[8] result = execute(schema, document, context);
+    return publish(result);
+}
+
+function errorResult(error) {
+    byte[8] result = new Object();
+    byte[8] item = new Object();
+    byte[8] errors = new Object();
+    result.data = 0;
+    item.message = "GraphQL execution failed";
+    item.path = 0;
+    item.locations = 0;
+    item.extensions = 0;
+    if (isGraphQLError(error) != 0) {
+        item.message = error.message;
+        item.path = error.path;
+        item.locations = error.locations;
+        item.extensions = error.extensions;
+    }
+    errors.length = 1;
+    errors.first = (Object)item;
+    Object.set((Object)errors, "0", (Object)item);
+    result.errors = (Object)errors;
+    return (Object)result;
+}
+
+export function endpoint(schema, decode, encode, createContext) {
+    byte[8] state = new Object();
+    state.schema = schema;
+    state.decode = decode;
+    state.encode = encode;
+    state.createContext = createContext;
+    state.execute = (Function)execute;
+    state.errorResult = (Function)errorResult;
+    return function(context) {
+        byte[8] document = 0;
+        try {
+            document = state.decode(context.request);
+        } catch transportError {
+            return context.json(state.encode(state.errorResult(transportError)), 400);
+        }
+        try {
+            byte[8] result = state.execute(state.schema, document, state.createContext(context));
+            return context.json(state.encode(result), 200);
+        } catch error {
+            return context.json(state.encode(state.errorResult(error)), 200);
+        }
+    };
+}
+
+export function handler(schema, createContext) {
+    byte[8] state = new Object();
+    state.schema = schema;
+    state.createContext = createContext;
+    state.execute = (Function)execute;
+    state.errorResult = (Function)errorResult;
+    return function(context) {
+        try {
+            byte[8] executionContext = state.createContext(context);
+            byte[8] result = state.execute(state.schema, context.request.body, executionContext);
+            return context.json(result, 200);
+        } catch error {
+            return context.json(state.errorResult(error), 200);
+        }
+    };
+}
+
+test "executes query aliases and arguments" {
+    byte[8] root = schema();
+    byte[8] greeting = function(parent, arguments, context, info) {
+        return arguments.value;
+    };
+    root.query("greeting", (Function)greeting);
+    byte[8] arguments = new Object();
+    arguments.value = 42;
+    byte[8] fields = selection("greeting", "welcome", (Object)arguments, 0);
+    byte[8] variables = new Object();
+    byte[8] query = document("query", (Object)fields, (Object)variables);
+    byte[8] result = execute((Object)root, (Object)query, 0);
+    byte[8] value = result.data.welcome;
+    if (value != 42) throw "GraphQL query result differs";
+}
+
+test "preserves variable width resolver results" {
+    byte[8] root = schema();
+    byte[8] resolver = function(parent, arguments, context, info) {
+        return "GraphQL result longer than eight bytes";
+    };
+    root.query("longResult", (Function)resolver);
+    byte[8] fields = selection("longResult", 0, new Object(), 0);
+    byte[8] query = document("query", (Object)fields, new Object());
+    byte[8] result = execute((Object)root, (Object)query, 0);
+    if (result.data.longResult != "GraphQL result longer than eight bytes") {
+        throw "variable width GraphQL result differs";
+    }
+}
+
+test "executes mutations separately from queries" {
+    byte[8] root = schema();
+    byte[8] update = function(parent, arguments, context, info) { return 42; };
+    root.mutation("update", (Function)update);
+    byte[8] fields = selection("update", 0, new Object(), 0);
+    byte[8] mutation = document("mutation", (Object)fields, new Object());
+    byte[8] result = execute((Object)root, (Object)mutation, 0);
+    byte[8] value = result.data.update;
+    if (value != 42) throw "GraphQL mutation result differs";
+}
+
+test "executes subscription roots" {
+    byte[8] root = schema();
+    byte[8] updates = function(parent, arguments, context, info) { return "stream"; };
+    root.subscription("updates", (Function)updates);
+    byte[8] fields = selection("updates", 0, new Object(), 0);
+    byte[8] subscription = document("subscription", (Object)fields, new Object());
+    byte[8] result = execute((Object)root, (Object)subscription, 0);
+    if (result.data.updates != "stream") throw "GraphQL subscription result differs";
+}
+
+test "parses native GraphQL documents" {
+    byte[8] root = schema();
+    byte[8] account = function(parent, arguments, context, info) {
+        return arguments.id;
+    };
+    byte[8] status = function(parent, arguments, context, info) {
+        if (arguments.limit != "2") throw "parsed GraphQL resolver argument differs";
+        return "ready";
+    };
+    root.query("account", (Function)account);
+    root.query("status", (Function)status);
+    byte[8] parsed = parse("query User($id: ID!) { user: account(id: $id) state: status(limit: 2) }");
+    parsed.variables.id = "user-7";
+    if (parsed.variables.id != "user-7") throw "GraphQL variable storage differs";
+    byte[8] result = execute((Object)root, (Object)parsed, 0);
+    if (result.data.user != "user-7") throw "GraphQL variable argument differs";
+    if (result.data.state != "ready") throw "second parsed GraphQL field differs";
+    close((Object)parsed);
+}
+
+test "executes parsed nested GraphQL selections" {
+    byte[8] root = schema();
+    byte[8] fields = new Object();
+    byte[8] name = function(parent, arguments, context, info) { return "Alex"; };
+    byte[8] city = function(parent, arguments, context, info) { return "Shanghai"; };
+    byte[8] contactFields = new Object();
+    Object.set(contactFields, "city", (Function)city);
+    byte[8] contactObject = new Object();
+    contactObject.value = new Object();
+    contactObject.resolvers = (Object)contactFields;
+    byte[8] contact = function(parent, arguments, context, info) {
+        return (Object)contactObject;
+    };
+    Object.set(fields, "name", (Function)name);
+    Object.set(fields, "contact", (Function)contact);
+    byte[8] nested = new Object();
+    nested.value = new Object();
+    nested.resolvers = (Object)fields;
+    byte[8] profile = function(parent, arguments, context, info) { return (Object)nested; };
+    byte[8] status = function(parent, arguments, context, info) { return "ready"; };
+    root.query("profile", (Function)profile);
+    root.query("status", (Function)status);
+    byte[8] parsed = parse("{ profile { display: name contact { city } } state: status }");
+    byte[8] result = execute((Object)root, (Object)parsed, 0);
+    if (result.data.profile.display != "Alex") throw "nested GraphQL alias differs";
+    if (result.data.profile.contact.city != "Shanghai") throw "deep GraphQL field differs";
+    if (result.data.state != "ready") throw "nested GraphQL sibling differs";
+    close((Object)parsed);
+}
+
+test "maps resolver failures into GraphQL errors" {
+    byte[8] root = schema();
+    root.query("failure", function(parent, arguments, context, info) { throw "failure"; });
+    byte[8] fields = selection("failure", 0, new Object(), 0);
+    byte[8] query = document("query", (Object)fields, new Object());
+    byte[8] createContext = function(context) { return new Object(); };
+    byte[8] endpoint = handler((Object)root, (Function)createContext);
+    byte[8] app = web.create();
+    app.post("/graphql", (Function)endpoint);
+    byte[8] response = app.fetch(web.request("POST", "/graphql", (Object)query));
+    if (response.status != 200 || response.body.data != 0) throw "GraphQL error boundary status differs";
+    if (response.body.errors.first.message != "GraphQL execution failed") throw "GraphQL error boundary payload differs";
+}
+
+test "preserves formal GraphQL error fields" {
+    byte[8] root = schema();
+    byte[8] createError = (Function)error;
+    root.query("failure", function(parent, arguments, context, info) {
+        throw createError("denied", "failure", 12, new Object());
+    });
+    byte[8] fields = selection("failure", 0, new Object(), 0);
+    byte[8] query = document("query", (Object)fields, new Object());
+    byte[8] createContext = function(context) { return new Object(); };
+    byte[8] endpoint = handler((Object)root, (Function)createContext);
+    byte[8] app = web.create();
+    app.post("/graphql", (Function)endpoint);
+    byte[8] response = app.fetch(web.request("POST", "/graphql", (Object)query));
+    if (response.body.errors.length != 1) throw "GraphQL error list length differs";
+    if (response.body.errors.first.message != "denied") throw "GraphQL error message differs";
+    if (response.body.errors.first.path != "failure") throw "GraphQL error path differs";
+    if (response.body.errors.first.locations != 12) throw "GraphQL error location differs";
+}
