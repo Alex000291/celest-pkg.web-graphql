@@ -1,14 +1,19 @@
 import "web-core" as web;
 import "std:GraphQL";
 import "std:Object";
+import "std:JSON";
+import "std:Test";
+import "std:Bytes";
 
 export function error(message, path, locations, extensions) {
     byte[8] value = new Object();
     value.kind = 0x47514C31;
-    value.message = message;
+    value.message = (String)message;
     value.path = path;
     value.locations = locations;
-    value.extensions = extensions;
+    if (Object.is_object(extensions) != 0)
+        Object.set_owned((Object)value, "extensions", extensions);
+    else value.extensions = extensions;
     return (Object)value;
 }
 
@@ -52,6 +57,7 @@ function Selection(name, alias, arguments, children) {
 
 function ParsedDocument(operation) {
     this.operation = operation;
+    this.operationName = byte(00);
     this.fields = 0;
     this.variables = new Object();
     this.next = 0;
@@ -192,13 +198,17 @@ export function execute(schema, document, context) {
     byte[8] resolvers = schema.queryFields;
     if (document.operation == "mutation") resolvers = schema.mutationFields;
     if (document.operation == "subscription") resolvers = schema.subscriptionFields;
-    if (document.nativeDocument == 0) result.data = resolveSelections(resolvers, document.fields, 0, context, document.variables);
+    byte[8] data = 0;
+    if (document.nativeDocument == 0)
+        data = resolveSelections(resolvers, document.fields, 0, context,
+                                 document.variables);
     else {
         byte[32] nativeDocument = document.nativeDocument;
         byte[8] fieldCount = document.fieldCount;
-        result.data = resolveNativeSelections(resolvers, nativeDocument, fieldCount, 0, 0,
-                                              context, (Object)document.variables);
+        data = resolveNativeSelections(resolvers, nativeDocument, fieldCount, 0, 0,
+                                       context, (Object)document.variables);
     }
+    Object.set_owned((Object)result, "data", (Object)data);
     return (Object)result;
 }
 
@@ -242,6 +252,7 @@ export function parse(source) {
     byte[32] nativeDocument = GraphQL.parse(source);
     byte[8] value = new ParsedDocument(GraphQL.operation(nativeDocument));
     value.nativeDocument = nativeDocument;
+    value.operationName = GraphQL.operation_name(nativeDocument);
     value.fieldCount = GraphQL.field_count(nativeDocument);
     return (Object)value;
 }
@@ -267,22 +278,20 @@ export function subscribe(schema, document, context, publish) {
 function errorResult(error) {
     byte[8] result = new Object();
     byte[8] item = new Object();
-    byte[8] errors = new Object();
-    result.data = 0;
-    item.message = "GraphQL execution failed";
-    item.path = 0;
-    item.locations = 0;
-    item.extensions = 0;
+    byte[8] errors = JSON.array();
+    result.data = JSON.nullValue();
+    item.message = (String)"GraphQL execution failed";
+    item.path = JSON.nullValue();
+    item.locations = JSON.nullValue();
+    item.extensions = JSON.nullValue();
     if (isGraphQLError(error) != 0) {
-        item.message = error.message;
+        item.message = (String)error.message;
         item.path = error.path;
         item.locations = error.locations;
         item.extensions = error.extensions;
     }
-    errors.length = 1;
-    errors.first = (Object)item;
-    Object.set((Object)errors, "0", (Object)item);
-    result.errors = (Object)errors;
+    JSON.array_push((Object)errors, (Object)item);
+    Object.set_owned((Object)result, "errors", (Object)errors);
     return (Object)result;
 }
 
@@ -299,13 +308,17 @@ export function endpoint(schema, decode, encode, createContext) {
         try {
             document = state.decode(context.request);
         } catch transportError {
-            return context.json(state.encode(state.errorResult(transportError)), 400);
+            byte[8] failure = state.errorResult(transportError);
+            byte[8] encoded = state.encode((Object)failure);
+            return context.json(encoded, 400);
         }
         try {
             byte[8] result = state.execute(state.schema, document, state.createContext(context));
             return context.json(state.encode(result), 200);
         } catch error {
-            return context.json(state.encode(state.errorResult(error)), 200);
+            byte[8] failure = state.errorResult(error);
+            byte[8] encoded = state.encode((Object)failure);
+            return context.json(encoded, 200);
         }
     };
 }
@@ -316,13 +329,39 @@ export function handler(schema, createContext) {
     state.createContext = createContext;
     state.execute = (Function)execute;
     state.errorResult = (Function)errorResult;
+    state.parse = (Function)parse;
+    state.close = (Function)close;
     return function(context) {
+        byte[8] document = 0;
+        try {
+            byte[8] envelope = context.request.json();
+            if (Object.address((Object)envelope, "query") == 0)
+                throw "GraphQL request is missing query";
+            document = state.parse(envelope.query);
+            if (Object.address((Object)envelope, "variables") != 0 &&
+                envelope.variables != 0)
+                document.variables = envelope.variables;
+            if (Object.address((Object)envelope, "operationName") != 0 &&
+                envelope.operationName != 0 &&
+                document.operationName != envelope.operationName) {
+                state.close((Object)document);
+                document = 0;
+                throw "GraphQL operationName does not match the document";
+            }
+        } catch transportError {
+            if (document != 0) state.close((Object)document);
+            byte[8] failure = state.errorResult(transportError);
+            return context.json((Object)failure, 400);
+        }
         try {
             byte[8] executionContext = state.createContext(context);
-            byte[8] result = state.execute(state.schema, context.request.body, executionContext);
-            return context.json(result, 200);
+            byte[8] result = state.execute(state.schema, (Object)document, executionContext);
+            state.close((Object)document);
+            return context.json((Object)result, 200);
         } catch error {
-            return context.json(state.errorResult(error), 200);
+            state.close((Object)document);
+            byte[8] failure = state.errorResult(error);
+            return context.json((Object)failure, 200);
         }
     };
 }
@@ -430,33 +469,48 @@ test "executes parsed nested GraphQL selections" {
 
 test "maps resolver failures into GraphQL errors" {
     byte[8] root = schema();
-    root.query("failure", function(parent, arguments, context, info) { throw "failure"; });
-    byte[8] fields = selection("failure", 0, new Object(), 0);
-    byte[8] query = document("query", (Object)fields, new Object());
+    byte[8] resolver = function(parent, arguments, context, info) { throw "failure"; };
+    root.query("failure", (Function)resolver);
     byte[8] createContext = function(context) { return new Object(); };
     byte[8] endpoint = handler((Object)root, (Function)createContext);
     byte[8] app = web.create();
     app.post("/graphql", (Function)endpoint);
-    byte[8] response = app.fetch(web.request("POST", "/graphql", (Object)query));
-    if (response.status != 200 || response.body.data != 0) throw "GraphQL error boundary status differs";
-    if (response.body.errors.first.message != "GraphQL execution failed") throw "GraphQL error boundary payload differs";
+    byte[8] request = web.request("POST", "/graphql", "{\"query\":\"{ failure }\"}");
+    request.withHeader("content-type", "application/json");
+    byte[8] response = app.fetch((Object)request);
+    byte[8] payload = JSON.parse(response.body);
+    byte[8] failure = Object.get((Object)payload.errors, "0");
+    byte[8] message = JSON.stringify(failure.message);
+    if (Test.byte_equal(Bytes.dynamic_bytes((Object)message),
+            "\"GraphQL execution failed\"") == 0)
+        throw "GraphQL error boundary payload differs";
+}
+
+test "serializes default GraphQL errors" {
+    byte[8] result = errorResult("failure");
+    byte[8] encoded = JSON.stringify((Object)result);
+    byte[8] decoded = JSON.parse(Bytes.dynamic_bytes((Object)encoded));
+    if (Object.address((Object)decoded, "errors") == 0)
+        throw "default GraphQL error envelope lost errors";
 }
 
 test "preserves formal GraphQL error fields" {
-    byte[8] root = schema();
-    byte[8] createError = (Function)error;
-    root.query("failure", function(parent, arguments, context, info) {
-        throw createError("denied", "failure", 12, new Object());
-    });
-    byte[8] fields = selection("failure", 0, new Object(), 0);
-    byte[8] query = document("query", (Object)fields, new Object());
-    byte[8] createContext = function(context) { return new Object(); };
-    byte[8] endpoint = handler((Object)root, (Function)createContext);
-    byte[8] app = web.create();
-    app.post("/graphql", (Function)endpoint);
-    byte[8] response = app.fetch(web.request("POST", "/graphql", (Object)query));
-    if (response.body.errors.length != 1) throw "GraphQL error list length differs";
-    if (response.body.errors.first.message != "denied") throw "GraphQL error message differs";
-    if (response.body.errors.first.path != "failure") throw "GraphQL error path differs";
-    if (response.body.errors.first.locations != 12) throw "GraphQL error location differs";
+    byte[8] failure = error("denied", (String)"failure", (Number)12, new Object());
+    byte[8] result = errorResult((Object)failure);
+    byte[8] encoded = JSON.stringify((Object)result);
+    byte[8] decoded = JSON.parse(Bytes.dynamic_bytes((Object)encoded));
+    if (Object.address((Object)decoded, "errors") == 0)
+        throw "formal GraphQL error envelope lost errors";
+    byte[8] item = Object.get((Object)decoded.errors, "0");
+    byte[8] message = JSON.stringify(item.message);
+    byte[8] path = JSON.stringify(item.path);
+    byte[8] locations = JSON.stringify(item.locations);
+    if (Test.byte_equal(Bytes.dynamic_bytes((Object)message), "\"denied\"") == 0)
+        throw "formal GraphQL serialization lost message";
+    if (Test.byte_equal(Bytes.dynamic_bytes((Object)path), "\"failure\"") == 0)
+        throw "formal GraphQL serialization lost path";
+    if (Test.byte_equal(Bytes.dynamic_bytes((Object)locations), "12") == 0)
+        throw "formal GraphQL serialization lost locations";
+    if (Object.is_object(item.extensions) == 0)
+        throw "formal GraphQL serialization lost extensions";
 }
