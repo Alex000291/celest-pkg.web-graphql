@@ -6,15 +6,14 @@ import "std:Test";
 import "std:Bytes";
 
 export function error(message, path, locations, extensions) {
-    byte[8] value = new Object();
-    value.kind = 0x47514C31;
-    value.message = (String)message;
-    value.path = path;
-    value.locations = locations;
-    if (Object.is_object(extensions) != 0)
-        Object.set_owned((Object)value, "extensions", extensions);
-    else value.extensions = extensions;
-    return (Object)value;
+    byte[8] value = new {
+        kind: 0x47514C31,
+        message: message,
+        path: path,
+        locations: locations,
+        extensions: extensions
+    };
+    return value;
 }
 
 function isGraphQLError(value) {
@@ -23,25 +22,764 @@ function isGraphQLError(value) {
     return value.kind == 0x47514C31;
 }
 
+function typeDefinition(name, kind) {
+    byte[8] type = new {
+        name: JSON.string(name),
+        kind: JSON.string(kind),
+        description: JSON.nullValue(),
+        fields: JSON.array(),
+        fieldCount: 0,
+        fieldsByName: new Object(),
+        resolvers: new Object(),
+        inputFields: JSON.array(),
+        inputFieldCount: 0,
+        interfaces: JSON.array(),
+        interfaceCount: 0,
+        enumValues: JSON.array(),
+        enumValueCount: 0,
+        possibleTypes: JSON.array(),
+        possibleTypeCount: 0,
+        ofType: JSON.nullValue(),
+        specifiedByURL: JSON.nullValue(),
+        isOneOf: JSON.boolean(0)
+    };
+    return type;
+}
+
+function fieldDefinition(name, type, typeResolvers) {
+    byte[8] field = new {
+        name: JSON.string(name),
+        description: JSON.nullValue(),
+        args: JSON.array(),
+        argsByName: new Object(),
+        argumentCount: 0,
+        type: 0,
+        typeResolvers: 0,
+        isDeprecated: JSON.boolean(0),
+        deprecationReason: JSON.nullValue()
+    };
+    Object.set(field, "type", type);
+    Object.set(field, "typeResolvers", typeResolvers);
+    return field;
+}
+
+function inputValueDefinition(name, type, typeResolvers, defaultValue) {
+    byte[8] input = new {
+        name: JSON.string(name),
+        description: JSON.nullValue(),
+        type: 0,
+        typeResolvers: 0,
+        defaultValue: defaultValue,
+        hasDefault: 0,
+        isDeprecated: JSON.boolean(0),
+        deprecationReason: JSON.nullValue()
+    };
+    Object.set(input, "type", type);
+    Object.set(input, "typeResolvers", typeResolvers);
+    byte[8] encodedDefault = JSON.stringify(defaultValue);
+    input.hasDefault = Test.byte_equal(
+        Bytes.dynamic_bytes(encodedDefault), "null") == 0;
+    return input;
+}
+
+function typeReference(kind, type, typeResolvers) {
+    byte[8] reference = typeDefinition(byte(00), kind);
+    reference.name = JSON.nullValue();
+    Object.set(reference, "ofType", type);
+    Object.set(reference, "typeResolvers", typeResolvers);
+    return reference;
+}
+
+function registerType(schema, type) {
+    type.typeResolvers = schema.typeResolvers;
+    type.fieldResolvers = schema.fieldResolvers;
+    type.inputValueResolvers = schema.inputValueResolvers;
+    type.enumValueResolvers = schema.enumValueResolvers;
+    Object.set(schema.typesByName, type.name, type);
+    byte[8] definition = new { value: 0, resolvers: 0 };
+    Object.set(definition, "value", type);
+    Object.set(definition, "resolvers", schema.typeResolvers);
+    JSON.array_push(schema.typeDefinitions, definition);
+    schema.typeCount = schema.typeCount + 1;
+    return type;
+}
+
+function registerField(schema, type, name, resultType, resolver) {
+    Object.set(type.resolvers, name, resolver);
+    byte[8] existing = Object.get(type.fieldsByName, name);
+    if (existing != 0) {
+        Object.set(existing, "type", resultType);
+        return existing;
+    }
+    byte[8] field = fieldDefinition(name, resultType, schema.typeResolvers);
+    field.inputValueResolvers = schema.inputValueResolvers;
+    Object.set(type.fieldsByName, name, field);
+    JSON.array_push(type.fields, field);
+    type.fieldCount = type.fieldCount + 1;
+    return field;
+}
+
+function schemaObjectType(name) {
+    byte[8] existing = Object.get(this.typesByName, name);
+    if (existing != 0) return existing;
+    byte[8] type = typeDefinition(name, "OBJECT");
+    return registerType(this, type);
+}
+
+function schemaScalarType(name) {
+    byte[8] existing = Object.get(this.typesByName, name);
+    if (existing != 0) return existing;
+    byte[8] type = typeDefinition(name, "SCALAR");
+    return registerType(this, type);
+}
+
+function schemaInterfaceType(name) {
+    byte[8] existing = Object.get(this.typesByName, name);
+    if (existing != 0) return existing;
+    byte[8] type = typeDefinition(name, "INTERFACE");
+    return registerType(this, type);
+}
+
+function schemaUnionType(name) {
+    byte[8] existing = Object.get(this.typesByName, name);
+    if (existing != 0) return existing;
+    byte[8] type = typeDefinition(name, "UNION");
+    return registerType(this, type);
+}
+
+function schemaEnumType(name) {
+    byte[8] existing = Object.get(this.typesByName, name);
+    if (existing != 0) return existing;
+    byte[8] type = typeDefinition(name, "ENUM");
+    return registerType(this, type);
+}
+
+function schemaInputObjectType(name) {
+    byte[8] existing = Object.get(this.typesByName, name);
+    if (existing != 0) return existing;
+    byte[8] type = typeDefinition(name, "INPUT_OBJECT");
+    return registerType(this, type);
+}
+
+function schemaNamedType(name) {
+    return Object.get(this.typesByName, name);
+}
+
+function schemaListType(type) {
+    return typeReference("LIST", type, this.typeResolvers);
+}
+
+function schemaNonNullType(type) {
+    return typeReference("NON_NULL", type, this.typeResolvers);
+}
+
+function schemaField(type, name, resultType, resolver) {
+    return registerField(this, type, name,
+        resultType, resolver);
+}
+
+function schemaArgument(field, name, type, defaultValue) {
+    byte[8] argument = inputValueDefinition(name, type,
+        this.typeResolvers, defaultValue);
+    JSON.array_push(field.args, argument);
+    Object.set(field.argsByName, name, argument);
+    field.argumentCount = field.argumentCount + 1;
+    return argument;
+}
+
+function schemaInputField(type, name, fieldType, defaultValue) {
+    byte[8] field = inputValueDefinition(name, fieldType,
+        this.typeResolvers, defaultValue);
+    JSON.array_push(type.inputFields, field);
+    type.inputFieldCount = type.inputFieldCount + 1;
+    return field;
+}
+
+function schemaEnumValue(type, name) {
+    byte[8] value = new {
+        name: JSON.string(name),
+        description: JSON.nullValue(),
+        isDeprecated: JSON.boolean(0),
+        deprecationReason: JSON.nullValue()
+    };
+    JSON.array_push(type.enumValues, value);
+    type.enumValueCount = type.enumValueCount + 1;
+    return value;
+}
+
+function schemaPossibleType(type, possibleType) {
+    byte[8] value = new { value: 0, resolvers: 0 };
+    byte[8] reference = typeDefinition(possibleType.name, possibleType.kind);
+    Object.set_owned(value, "value", reference);
+    Object.set(value, "resolvers", this.typeResolvers);
+    JSON.array_push(type.possibleTypes, value);
+    type.possibleTypeCount = type.possibleTypeCount + 1;
+    return type;
+}
+
+function schemaImplements(type, interfaceType) {
+    byte[8] value = new { value: 0, resolvers: 0 };
+    byte[8] reference = typeDefinition(interfaceType.name, interfaceType.kind);
+    Object.set_owned(value, "value", reference);
+    Object.set(value, "resolvers", this.typeResolvers);
+    JSON.array_push(type.interfaces, value);
+    type.interfaceCount = type.interfaceCount + 1;
+    return type;
+}
+
+function schemaDirective(name, locations, isRepeatable) {
+    byte[8] encodedLocations = JSON.stringify(locations);
+    byte[8] ownedLocations = JSON.parse(
+        Bytes.dynamic_bytes(encodedLocations));
+    byte[1] repeatable = isRepeatable != 0;
+    byte[8] directive = new {
+        name: JSON.string(name),
+        description: JSON.nullValue(),
+        locations: 0,
+        repeatable: repeatable,
+        args: JSON.array(),
+        argsByName: new Object(),
+        argumentCount: 0,
+        inputValueResolvers: 0
+    };
+    Object.set_owned(directive, "locations", ownedLocations);
+    Object.set(directive, "inputValueResolvers",
+        this.inputValueResolvers);
+    JSON.array_push(this.directives, directive);
+    return directive;
+}
+
+function schemaDescribe(value, description) {
+    value.description = description;
+    return value;
+}
+
+function schemaDeprecate(value, reason) {
+    value.isDeprecated = JSON.boolean(1);
+    value.deprecationReason = reason;
+    return value;
+}
+
+function schemaRootType(operation, type) {
+    if (Test.byte_equal(operation, "query") != 0) {
+        Object.set(type.resolvers, "__schema",
+            Object.get(this.queryFields, "__schema"));
+        Object.set(type.resolvers, "__type",
+            Object.get(this.queryFields, "__type"));
+        Object.set(this, "queryType", type);
+        Object.set(this, "queryFields", type.resolvers);
+    }
+    if (Test.byte_equal(operation, "mutation") != 0) {
+        Object.set(this, "mutationType", type);
+        Object.set(this, "mutationFields", type.resolvers);
+    }
+    if (Test.byte_equal(operation, "subscription") != 0) {
+        Object.set(this, "subscriptionType", type);
+        Object.set(this, "subscriptionFields", type.resolvers);
+    }
+    return type;
+}
+
+function schemaTypeReference(schema, reference) {
+    byte[8] kind = JSON.property_bytes(reference, "kind");
+    if (Test.byte_equal(Bytes.dynamic_bytes(kind), "NAMED") != 0)
+        return schema.namedType(Bytes.dynamic_bytes(JSON.property_bytes(
+            reference, "name")));
+    byte[8] nested = schemaTypeReference(schema, reference.ofType);
+    if (Test.byte_equal(Bytes.dynamic_bytes(kind), "LIST") != 0)
+        return schema.listType(nested);
+    if (Test.byte_equal(Bytes.dynamic_bytes(kind), "NON_NULL") != 0)
+        return schema.nonNullType(nested);
+    throw "unknown GraphQL SDL type reference";
+}
+
+function schemaDefaultValue(definition) {
+    byte[8] source = JSON.property_bytes(definition, "defaultValue");
+    if (Test.byte_equal(Bytes.dynamic_bytes(source), "null") != 0)
+        return JSON.nullValue();
+    try { return JSON.parse(Bytes.dynamic_bytes(source)); }
+    catch error { return JSON.string(Bytes.dynamic_bytes(source)); }
+}
+
+function schemaResolver(resolvers, typeName, fieldName) {
+    if (resolvers == 0) return 0;
+    byte[8] fields = Object.get(resolvers, typeName);
+    if (fields == 0) return 0;
+    return Object.get(fields, fieldName);
+}
+
+function schemaFromSDL(source, resolvers, createSchema) {
+    byte[8] encoded = GraphQL.parse_schema(source);
+    byte[8] ast = JSON.parse(Bytes.dynamic_bytes(encoded));
+    byte[8] result = createSchema();
+    byte[8] typeCount = JSON.array_length(ast.types);
+    byte[8] typeIndex = 0;
+    while (typeIndex < typeCount) {
+        byte[8] definition = JSON.array_at(ast.types, typeIndex);
+        byte[8] kind = JSON.property_bytes(definition, "kind");
+        byte[8] name = JSON.property_bytes(definition, "name");
+        byte[8] type = 0;
+        if (Test.byte_equal(Bytes.dynamic_bytes(kind), "OBJECT") != 0)
+            type = result.objectType(Bytes.dynamic_bytes(name));
+        if (Test.byte_equal(Bytes.dynamic_bytes(kind), "INTERFACE") != 0)
+            type = result.interfaceType(Bytes.dynamic_bytes(name));
+        if (Test.byte_equal(Bytes.dynamic_bytes(kind), "UNION") != 0)
+            type = result.unionType(Bytes.dynamic_bytes(name));
+        if (Test.byte_equal(Bytes.dynamic_bytes(kind), "ENUM") != 0)
+            type = result.enumType(Bytes.dynamic_bytes(name));
+        if (Test.byte_equal(Bytes.dynamic_bytes(kind), "INPUT_OBJECT") != 0)
+            type = result.inputObjectType(Bytes.dynamic_bytes(name));
+        if (Test.byte_equal(Bytes.dynamic_bytes(kind), "SCALAR") != 0)
+            type = result.scalarType(Bytes.dynamic_bytes(name));
+        typeIndex = typeIndex + 1;
+    }
+
+    byte[8] queryRoot = result.namedType(Bytes.dynamic_bytes(
+        JSON.property_bytes(ast.roots, "query")));
+    byte[8] mutationRoot = result.namedType(Bytes.dynamic_bytes(
+        JSON.property_bytes(ast.roots, "mutation")));
+    byte[8] subscriptionRoot = result.namedType(Bytes.dynamic_bytes(
+        JSON.property_bytes(ast.roots, "subscription")));
+    if (queryRoot != 0 && queryRoot != result.queryType)
+        result.rootType("query", queryRoot);
+    if (mutationRoot != 0 && mutationRoot != result.mutationType)
+        result.rootType("mutation", mutationRoot);
+    if (subscriptionRoot != 0 && subscriptionRoot != result.subscriptionType)
+        result.rootType("subscription", subscriptionRoot);
+
+    typeIndex = 0;
+    while (typeIndex < typeCount) {
+        byte[8] definition = JSON.array_at(ast.types, typeIndex);
+        byte[8] kind = JSON.property_bytes(definition, "kind");
+        byte[8] name = JSON.property_bytes(definition, "name");
+        byte[8] type = result.namedType(Bytes.dynamic_bytes(name));
+        byte[8] fieldCount = JSON.array_length(definition.fields);
+        byte[8] fieldIndex = 0;
+        while (fieldIndex < fieldCount) {
+            byte[8] fieldDefinition = JSON.array_at(
+                definition.fields, fieldIndex);
+            byte[8] fieldName = JSON.property_bytes(
+                fieldDefinition, "name");
+            byte[8] fieldType = schemaTypeReference(
+                result, fieldDefinition.type);
+            byte[8] resolver = schemaResolver(resolvers,
+                Bytes.dynamic_bytes(name),
+                Bytes.dynamic_bytes(fieldName));
+            byte[8] field = 0;
+            byte[8] queryName = JSON.property_bytes(
+                ast.roots, "query");
+            byte[8] mutationName = JSON.property_bytes(
+                ast.roots, "mutation");
+            byte[8] subscriptionName = JSON.property_bytes(
+                ast.roots, "subscription");
+            if (Test.byte_equal(Bytes.dynamic_bytes(name),
+                    Bytes.dynamic_bytes(queryName)) != 0)
+                field = result.typedQuery(
+                    Bytes.dynamic_bytes(fieldName),
+                    fieldType, resolver);
+            else if (Test.byte_equal(Bytes.dynamic_bytes(name),
+                    Bytes.dynamic_bytes(mutationName)) != 0)
+                field = result.typedMutation(
+                    Bytes.dynamic_bytes(fieldName),
+                    fieldType, resolver);
+            else if (Test.byte_equal(Bytes.dynamic_bytes(name),
+                    Bytes.dynamic_bytes(subscriptionName)) != 0)
+                field = result.typedSubscription(
+                    Bytes.dynamic_bytes(fieldName),
+                    fieldType, resolver);
+            else field = result.field(type,
+                    Bytes.dynamic_bytes(fieldName),
+                    fieldType, resolver);
+            byte[8] argumentCount = JSON.array_length(
+                fieldDefinition.arguments);
+            byte[8] argumentIndex = 0;
+            while (argumentIndex < argumentCount) {
+                byte[8] argument = JSON.array_at(
+                    fieldDefinition.arguments, argumentIndex);
+                byte[8] argumentType = schemaTypeReference(
+                    result, argument.type);
+                result.argument(field,
+                    Bytes.dynamic_bytes(JSON.property_bytes(
+                        argument, "name")),
+                    argumentType, schemaDefaultValue(argument));
+                argumentIndex = argumentIndex + 1;
+            }
+            fieldIndex = fieldIndex + 1;
+        }
+
+        byte[8] inputCount = JSON.array_length(definition.inputFields);
+        byte[8] inputIndex = 0;
+        while (inputIndex < inputCount) {
+            byte[8] input = JSON.array_at(
+                definition.inputFields, inputIndex);
+            byte[8] inputType = schemaTypeReference(
+                result, input.type);
+            result.inputField(type,
+                Bytes.dynamic_bytes(JSON.property_bytes(
+                    input, "name")),
+                inputType, schemaDefaultValue(input));
+            inputIndex = inputIndex + 1;
+        }
+
+        byte[8] enumCount = JSON.array_length(definition.enumValues);
+        byte[8] enumIndex = 0;
+        while (enumIndex < enumCount) {
+            byte[8] value = JSON.array_at(
+                definition.enumValues, enumIndex);
+            result.enumValue(type,
+                Bytes.dynamic_bytes(JSON.property_bytes(
+                    value, "name")));
+            enumIndex = enumIndex + 1;
+        }
+
+        byte[8] interfaceCount = JSON.array_length(definition.interfaces);
+        byte[8] interfaceIndex = 0;
+        while (interfaceIndex < interfaceCount) {
+            byte[8] interfaceDefinition = JSON.array_at(
+                definition.interfaces, interfaceIndex);
+            byte[8] interfaceName = JSON.property_bytes(
+                interfaceDefinition, "name");
+            byte[8] interfaceType = result.namedType(
+                Bytes.dynamic_bytes(interfaceName));
+            result.implements(type, interfaceType);
+            interfaceIndex = interfaceIndex + 1;
+        }
+
+        byte[8] possibleCount = JSON.array_length(definition.possibleTypes);
+        byte[8] possibleIndex = 0;
+        while (possibleIndex < possibleCount) {
+            byte[8] possibleName = JSON.array_at(
+                definition.possibleTypes, possibleIndex);
+            result.possibleType(type,
+                result.namedType(Bytes.dynamic_bytes(
+                    JSON.property_bytes(possibleName, "name"))));
+            possibleIndex = possibleIndex + 1;
+        }
+        typeIndex = typeIndex + 1;
+    }
+
+    byte[8] directiveCount = JSON.array_length(ast.directives);
+    byte[8] directiveIndex = 0;
+    while (directiveIndex < directiveCount) {
+        byte[8] definition = JSON.array_at(
+            ast.directives, directiveIndex);
+        byte[8] directiveName = JSON.property_bytes(
+            definition, "name");
+        byte[8] repeatableValue = JSON.stringify(definition.repeatable);
+        byte[1] repeatable = Test.byte_equal(
+            Bytes.dynamic_bytes(repeatableValue), "true") != 0;
+        byte[8] directive = result.directive(
+            Bytes.dynamic_bytes(directiveName),
+            definition.locations, repeatable);
+        byte[8] argumentCount = JSON.array_length(
+            definition.arguments);
+        byte[8] argumentIndex = 0;
+        while (argumentIndex < argumentCount) {
+            byte[8] argument = JSON.array_at(
+                definition.arguments, argumentIndex);
+            byte[8] argumentType = schemaTypeReference(
+                result, argument.type);
+            byte[8] argumentName = JSON.property_bytes(
+                argument, "name");
+            result.argument(directive,
+                Bytes.dynamic_bytes(argumentName),
+                argumentType, schemaDefaultValue(argument));
+            argumentIndex = argumentIndex + 1;
+        }
+        directiveIndex = directiveIndex + 1;
+    }
+    return result;
+}
+
+function schemaTypedQuery(name, resultType, resolver) {
+    Object.set(this.queryFields, name, resolver);
+    return registerField(this, this.queryType, name,
+        resultType, resolver);
+}
+
+function schemaTypedMutation(name, resultType, resolver) {
+    Object.set(this.mutationFields, name, resolver);
+    return registerField(this, this.mutationType, name,
+        resultType, resolver);
+}
+
+function schemaTypedSubscription(name, resultType, resolver) {
+    Object.set(this.subscriptionFields, name, resolver);
+    return registerField(this, this.subscriptionType, name,
+        resultType, resolver);
+}
+
+function introspectionObject(value, resolvers) {
+    byte[8] result = new { value: 0, resolvers: 0 };
+    Object.set(result, "value", value);
+    Object.set(result, "resolvers", resolvers);
+    return result;
+}
+
+function introspectionList(values, resolvers) {
+    byte[8] result = new { listValues: 0, resolvers: 0 };
+    Object.set(result, "listValues", values);
+    Object.set(result, "resolvers", resolvers);
+    return result;
+}
+
+function introspectionNull() {
+    return new { nullValue: 1 };
+}
+
+function schemaDescription(parent, arguments, context, info) {
+    return parent.description;
+}
+
+function schemaQueryType(parent, arguments, context, info) {
+    return introspectionObject(parent.queryType, parent.typeResolvers);
+}
+
+function schemaMutationType(parent, arguments, context, info) {
+    if (parent.mutationType.fieldCount == 0) return introspectionNull();
+    return introspectionObject(parent.mutationType, parent.typeResolvers);
+}
+
+function schemaSubscriptionType(parent, arguments, context, info) {
+    if (parent.subscriptionType.fieldCount == 0) return introspectionNull();
+    return introspectionObject(parent.subscriptionType, parent.typeResolvers);
+}
+
+function schemaTypes(parent, arguments, context, info) {
+    return introspectionList(parent.typeDefinitions, parent.typeResolvers);
+}
+
+function schemaDirectives(parent, arguments, context, info) {
+    return introspectionList(parent.directives, parent.directiveResolvers);
+}
+
+function typeKind(parent, arguments, context, info) { return parent.kind; }
+function typeName(parent, arguments, context, info) { return parent.name; }
+function typeDescription(parent, arguments, context, info) { return parent.description; }
+
+function typeFields(parent, arguments, context, info) {
+    return introspectionList(parent.fields, parent.fieldResolvers);
+}
+
+function typeInputFields(parent, arguments, context, info) {
+    return introspectionList(parent.inputFields, parent.inputValueResolvers);
+}
+
+function typeInterfaces(parent, arguments, context, info) {
+    return introspectionList(parent.interfaces, parent.typeResolvers);
+}
+
+function typeEnumValues(parent, arguments, context, info) {
+    return introspectionList(parent.enumValues, parent.enumValueResolvers);
+}
+
+function typePossibleTypes(parent, arguments, context, info) {
+    return introspectionList(parent.possibleTypes, parent.typeResolvers);
+}
+
+function typeOfType(parent, arguments, context, info) {
+    if (Object.is_object(parent.ofType) == 0) return introspectionNull();
+    return introspectionObject(parent.ofType, parent.typeResolvers);
+}
+
+function typeSpecifiedByURL(parent, arguments, context, info) {
+    return parent.specifiedByURL;
+}
+
+function typeIsOneOf(parent, arguments, context, info) { return parent.isOneOf; }
+
+function fieldName(parent, arguments, context, info) { return parent.name; }
+function fieldDescription(parent, arguments, context, info) { return parent.description; }
+
+function fieldArguments(parent, arguments, context, info) {
+    return introspectionList(parent.args, parent.inputValueResolvers);
+}
+
+function fieldType(parent, arguments, context, info) {
+    return introspectionObject(parent.type, parent.typeResolvers);
+}
+
+function fieldIsDeprecated(parent, arguments, context, info) {
+    return parent.isDeprecated;
+}
+
+function fieldDeprecationReason(parent, arguments, context, info) {
+    return parent.deprecationReason;
+}
+
+function inputValueName(parent, arguments, context, info) { return parent.name; }
+function inputValueDescription(parent, arguments, context, info) { return parent.description; }
+
+function inputValueType(parent, arguments, context, info) {
+    return introspectionObject(parent.type, parent.typeResolvers);
+}
+
+function inputValueDefault(parent, arguments, context, info) {
+    if (parent.hasDefault == 0) return JSON.nullValue();
+    byte[8] encoded = JSON.stringify(parent.defaultValue);
+    return JSON.string(Bytes.dynamic_bytes(encoded));
+}
+
+function inputValueIsDeprecated(parent, arguments, context, info) {
+    return parent.isDeprecated;
+}
+
+function inputValueDeprecationReason(parent, arguments, context, info) {
+    return parent.deprecationReason;
+}
+
+function enumValueName(parent, arguments, context, info) { return parent.name; }
+function enumValueDescription(parent, arguments, context, info) { return parent.description; }
+function enumValueIsDeprecated(parent, arguments, context, info) { return parent.isDeprecated; }
+function enumValueDeprecationReason(parent, arguments, context, info) { return parent.deprecationReason; }
+
+function directiveName(parent, arguments, context, info) { return parent.name; }
+function directiveDescription(parent, arguments, context, info) { return parent.description; }
+function directiveIsRepeatable(parent, arguments, context, info) {
+    if (parent.repeatable != 0) return JSON.boolean(1);
+    return JSON.boolean(0);
+}
+function directiveLocations(parent, arguments, context, info) { return parent.locations; }
+
+function directiveArguments(parent, arguments, context, info) {
+    return introspectionList(parent.args, parent.inputValueResolvers);
+}
+
+function introspectionSchema(parent, arguments, context, info) {
+    return introspectionObject(parent, parent.schemaResolvers);
+}
+
+function introspectionNamedType(parent, arguments, context, info) {
+    byte[8] requested = JSON.stringify(arguments.name);
+    byte[8] index = 0;
+    while (index < parent.typeCount) {
+        byte[8] definition = JSON.array_at(
+            parent.typeDefinitions, index);
+        byte[8] candidate = JSON.stringify(definition.value.name);
+        if (Test.byte_equal(Bytes.dynamic_bytes(candidate),
+                Bytes.dynamic_bytes(requested)) != 0)
+            return introspectionObject(definition.value, parent.typeResolvers);
+        index = index + 1;
+    }
+    return introspectionNull();
+}
+
 function Schema() {
     this.queryFields = new Object();
     this.mutationFields = new Object();
     this.subscriptionFields = new Object();
+    this.persistedOperations = new Object();
+
+    this.schemaResolvers = new Object();
+    Object.set(this.schemaResolvers, "description", schemaDescription);
+    Object.set(this.schemaResolvers, "queryType", schemaQueryType);
+    Object.set(this.schemaResolvers, "mutationType", schemaMutationType);
+    Object.set(this.schemaResolvers, "subscriptionType", schemaSubscriptionType);
+    Object.set(this.schemaResolvers, "types", schemaTypes);
+    Object.set(this.schemaResolvers, "directives", schemaDirectives);
+
+    this.typeResolvers = new Object();
+    Object.set(this.typeResolvers, "kind", typeKind);
+    Object.set(this.typeResolvers, "name", typeName);
+    Object.set(this.typeResolvers, "description", typeDescription);
+    Object.set(this.typeResolvers, "fields", typeFields);
+    Object.set(this.typeResolvers, "inputFields", typeInputFields);
+    Object.set(this.typeResolvers, "interfaces", typeInterfaces);
+    Object.set(this.typeResolvers, "enumValues", typeEnumValues);
+    Object.set(this.typeResolvers, "possibleTypes", typePossibleTypes);
+    Object.set(this.typeResolvers, "ofType", typeOfType);
+    Object.set(this.typeResolvers, "specifiedByURL", typeSpecifiedByURL);
+    Object.set(this.typeResolvers, "isOneOf", typeIsOneOf);
+
+    this.fieldResolvers = new Object();
+    Object.set(this.fieldResolvers, "name", fieldName);
+    Object.set(this.fieldResolvers, "description", fieldDescription);
+    Object.set(this.fieldResolvers, "args", fieldArguments);
+    Object.set(this.fieldResolvers, "type", fieldType);
+    Object.set(this.fieldResolvers, "isDeprecated", fieldIsDeprecated);
+    Object.set(this.fieldResolvers, "deprecationReason", fieldDeprecationReason);
+
+    this.inputValueResolvers = new Object();
+    Object.set(this.inputValueResolvers, "name", inputValueName);
+    Object.set(this.inputValueResolvers, "description", inputValueDescription);
+    Object.set(this.inputValueResolvers, "type", inputValueType);
+    Object.set(this.inputValueResolvers, "defaultValue", inputValueDefault);
+    Object.set(this.inputValueResolvers, "isDeprecated", inputValueIsDeprecated);
+    Object.set(this.inputValueResolvers, "deprecationReason", inputValueDeprecationReason);
+
+    this.enumValueResolvers = new Object();
+    Object.set(this.enumValueResolvers, "name", enumValueName);
+    Object.set(this.enumValueResolvers, "description", enumValueDescription);
+    Object.set(this.enumValueResolvers, "isDeprecated", enumValueIsDeprecated);
+    Object.set(this.enumValueResolvers, "deprecationReason", enumValueDeprecationReason);
+
+    this.directiveResolvers = new Object();
+    Object.set(this.directiveResolvers, "name", directiveName);
+    Object.set(this.directiveResolvers, "description", directiveDescription);
+    Object.set(this.directiveResolvers, "isRepeatable", directiveIsRepeatable);
+    Object.set(this.directiveResolvers, "locations", directiveLocations);
+    Object.set(this.directiveResolvers, "args", directiveArguments);
+
+    this.typesByName = new Object();
+    this.typeDefinitions = JSON.array();
+    this.typeCount = 0;
+    this.directives = JSON.array();
+    this.description = JSON.nullValue();
+    this.queryType = typeDefinition("Query", "OBJECT");
+    this.mutationType = typeDefinition("Mutation", "OBJECT");
+    this.subscriptionType = typeDefinition("Subscription", "OBJECT");
+    this.stringType = typeDefinition("String", "SCALAR");
+    this.booleanType = typeDefinition("Boolean", "SCALAR");
+    this.intType = typeDefinition("Int", "SCALAR");
+    this.floatType = typeDefinition("Float", "SCALAR");
+    this.idType = typeDefinition("ID", "SCALAR");
+    registerType(this, this.queryType);
+    registerType(this, this.mutationType);
+    registerType(this, this.subscriptionType);
+    registerType(this, this.stringType);
+    registerType(this, this.booleanType);
+    registerType(this, this.intType);
+    registerType(this, this.floatType);
+    registerType(this, this.idType);
+    Object.set(this.queryFields, "__schema", introspectionSchema);
+    Object.set(this.queryFields, "__type", introspectionNamedType);
     return;
 }
 
+export function asyncResolver(invoke) {
+    return new { kind: 0x47514153, invoke: invoke };
+}
+
+function isAsyncResolver(value) {
+    if (Object.is_object(value) == 0) return 0;
+    if (Object.address(value, "kind") == 0) return 0;
+    return value.kind == 0x47514153;
+}
+
 function schemaQuery(name, resolver) {
-    Object.set(this.queryFields, name, resolver);
+    if (isAsyncResolver(resolver) != 0)
+        Object.set_owned(this.queryFields, name, resolver);
+    else Object.set(this.queryFields, name, resolver);
+    registerField(this, this.queryType, name,
+        this.stringType, resolver);
     return this;
 }
 
 function schemaMutation(name, resolver) {
-    Object.set(this.mutationFields, name, resolver);
+    if (isAsyncResolver(resolver) != 0)
+        Object.set_owned(this.mutationFields, name, resolver);
+    else Object.set(this.mutationFields, name, resolver);
+    registerField(this, this.mutationType, name,
+        this.stringType, resolver);
     return this;
 }
 
 function schemaSubscription(name, resolver) {
-    Object.set(this.subscriptionFields, name, resolver);
+    if (isAsyncResolver(resolver) != 0)
+        Object.set_owned(this.subscriptionFields, name, resolver);
+    else Object.set(this.subscriptionFields, name, resolver);
+    registerField(this, this.subscriptionType, name,
+        this.stringType, resolver);
     return this;
 }
 
@@ -50,39 +788,71 @@ function Selection(name, alias, arguments, children) {
     this.alias = alias;
     this.arguments = arguments;
     this.children = children;
-    this.next = 0;
     this.directives = new Object();
+    return;
+}
+
+function SelectionList() {
+    byte[8] items = JSON.array();
+    Object.set_owned(this, "items", items);
     return;
 }
 
 function ParsedDocument(operation) {
     this.operation = operation;
     this.operationName = byte(00);
-    this.fields = 0;
+    this.fields = JSON.array();
     this.variables = new Object();
-    this.next = 0;
     this.nativeDocument = 0;
     this.fieldCount = 0;
     return;
 }
 
 function selectionNext(value) {
-    this.next = value;
-    return value;
+    byte[8] count = JSON.array_length(value.items);
+    byte[8] index = 0;
+    while (index < count) {
+        JSON.array_push(this.items,
+            JSON.array_at(value.items, index));
+        index = index + 1;
+    }
+    return this;
 }
 
 function initializePrototypes() {
-    byte[8] schemaPrototype = new Object();
-    schemaPrototype.query = (Function)schemaQuery;
-    schemaPrototype.mutation = (Function)schemaMutation;
-    schemaPrototype.subscription = (Function)schemaSubscription;
-    Schema.prototype = (Object)schemaPrototype;
+    byte[8] schemaPrototype = new {
+        query: schemaQuery,
+        mutation: schemaMutation,
+        subscription: schemaSubscription,
+        objectType: schemaObjectType,
+        scalarType: schemaScalarType,
+        interfaceType: schemaInterfaceType,
+        unionType: schemaUnionType,
+        enumType: schemaEnumType,
+        inputObjectType: schemaInputObjectType,
+        namedType: schemaNamedType,
+        listType: schemaListType,
+        nonNullType: schemaNonNullType,
+        field: schemaField,
+        argument: schemaArgument,
+        inputField: schemaInputField,
+        enumValue: schemaEnumValue,
+        possibleType: schemaPossibleType,
+        implements: schemaImplements,
+        directive: schemaDirective,
+        describe: schemaDescribe,
+        deprecate: schemaDeprecate,
+        rootType: schemaRootType,
+        typedQuery: schemaTypedQuery,
+        typedMutation: schemaTypedMutation,
+        typedSubscription: schemaTypedSubscription
+    };
+    Schema.prototype = schemaPrototype;
 
-    byte[8] selectionPrototype = new Object();
-    selectionPrototype.then = (Function)selectionNext;
-    Selection.prototype = (Object)selectionPrototype;
-
-
+    byte[8] selectionListPrototype = new {
+        then: selectionNext
+    };
+    SelectionList.prototype = selectionListPrototype;
 
     return 1;
 }
@@ -93,159 +863,496 @@ export function schema() {
     return new Schema();
 }
 
+export function sdl(source, resolvers) {
+    return schemaFromSDL(source, resolvers, schema);
+}
+
 export function selection(name, alias, arguments, children) {
-    return new Selection(name, alias, arguments, children);
+    byte[8] fields = new SelectionList();
+    byte[8] value = new Selection(name, alias, arguments, children);
+    JSON.array_push(fields.items, value);
+    return fields;
 }
 
 export function document(operation, fields, variables) {
-    byte[8] value = new Object();
-    value.operation = operation;
-    value.fields = fields;
-    value.variables = variables;
-    value.next = 0;
-    return (Object)value;
+    byte[8] value = new {
+        operation: operation,
+        fields: fields,
+        variables: variables
+    };
+    return value;
 }
 
-byte[8] resolveSelections = function(resolvers, fields, parent, context, variables) {
+function executionError(error, path) {
+    byte[8] message = (String)"GraphQL execution failed";
+    byte[8] locations = JSON.nullValue();
+    byte[8] extensions = JSON.nullValue();
+    if (isGraphQLError(error) != 0) {
+        message = error.message;
+        locations = error.locations;
+        extensions = error.extensions;
+    }
+    return new { message: message, path: path,
+        locations: locations, extensions: extensions };
+}
+
+function setResolvedValue(target, name, value) {
+    if (Object.is_object(value) != 0)
+        return Object.set_owned(target, name, value);
+    return Object.set(target, name, value);
+}
+
+function resolveSelections(resolvers, fields, parent, context, variables, failures) {
     byte[8] data = new Object();
-    byte[8] field = fields;
-    while (field != 0) {
+    byte[8] count = JSON.array_length(fields.items);
+    byte[8] index = 0;
+    while (index < count) {
+        byte[8] field = JSON.array_at(fields.items, index);
         byte[8] resolver = Object.get(resolvers, field.name);
         if (resolver == 0) throw "unknown GraphQL field";
-        byte[8] info = new Object();
-        byte[8] work = new Object();
-        info.name = field.name;
-        info.variables = variables;
-        work.result = resolver(parent, field.arguments, context, (Object)info);
-        if (field.children != 0) {
-            work.result = resolveSelections(work.result.resolvers, field.children, work.result.value, context, variables);
+        byte[8] info = new { name: field.name, variables: variables };
+        byte[8] work = new { result: 0, failed: 0 };
+        try {
+            work.result = resolver(parent, field.arguments, context,
+                info);
+        } catch error {
+            work.result = JSON.nullValue();
+            work.failed = 1;
+            JSON.array_push(failures.items, new {
+                message: JSON.string("GraphQL execution failed"),
+                path: JSON.nullValue(),
+                locations: JSON.nullValue(),
+                extensions: JSON.nullValue()
+            });
+            failures.count = failures.count + 1;
+        }
+        if (field.children != 0 && work.failed == 0) {
+            work.result = resolveSelections(work.result.resolvers,
+                field.children, work.result.value, context, variables, failures);
         }
         if (field.alias == 0) {
-            Object.set(data, field.name, work.result);
+            setResolvedValue(data, field.name, work.result);
         } else {
-            Object.set(data, field.alias, work.result);
+            setResolvedValue(data, field.alias, work.result);
         }
-        field = field.next;
-    }
-    return (Object)data;
-};
-
-byte[8] resolveNativeSelections = function(resolvers, nativeDocument, fieldCount, parentIndex, parent, context, variables) {
-    byte[8] scopes = new Object();
-    byte[8] rootScope = new Object();
-    rootScope.data = new Object();
-    rootScope.resolvers = (Object)resolvers;
-    rootScope.parent = parent;
-    byte[8] rootIndex = 0;
-    Object.set(scopes, rootIndex, (Object)rootScope);
-    byte[8] index = 0;
-    while (index < fieldCount) {
-        byte[8] item = new Object();
-        byte[8] fieldParent = GraphQL.field_parent(nativeDocument, index);
-        item.scope = Object.get(scopes, fieldParent);
-        if (item.scope == 0) throw "invalid GraphQL selection parent";
-        item.name = GraphQL.field_name(nativeDocument, index, 0);
-        item.alias = GraphQL.field_name(nativeDocument, index, 1);
-        item.resolver = Object.get(item.scope.resolvers, item.name);
-        if (item.resolver == 0) throw "unknown GraphQL field";
-        byte[8] arguments = new Object();
-        byte[8] argumentCount = GraphQL.argument_count(nativeDocument, index);
-        byte[8] argumentIndex = 0;
-        while (argumentIndex < argumentCount) {
-            byte[8] argument = new Object();
-            argument.name = GraphQL.argument(nativeDocument, index, argumentIndex, 0);
-            argument.variableName = GraphQL.argument(nativeDocument, index, argumentIndex, 2);
-            if (argument.variableName == 0) argument.value = GraphQL.argument(nativeDocument, index, argumentIndex, 1);
-            else {
-                argument.value = Object.get(variables, argument.variableName);
-            }
-            Object.set(arguments, argument.name, argument.value);
-            argumentIndex = argumentIndex + 1;
-        }
-        byte[8] info = new Object();
-        info.name = item.name;
-        info.variables = variables;
-        byte[8] resolver = item.resolver;
-        item.result = resolver(item.scope.parent, (Object)arguments, context, (Object)info);
-        byte[8] childParent = index + 1;
-        byte[8] childIndex = index + 1;
-        byte[8] hasChildren = 0;
-        while (childIndex < fieldCount) {
-            byte[8] candidateParent = GraphQL.field_parent(nativeDocument, childIndex);
-            if (candidateParent == childParent) hasChildren = 1;
-            childIndex = childIndex + 1;
-        }
-        if (hasChildren != 0) {
-            byte[8] childScope = new Object();
-            childScope.data = new Object();
-            byte[8] childResolvers = item.result.resolvers;
-            byte[8] childValue = item.result.value;
-            childScope.resolvers = (Object)childResolvers;
-            childScope.parent = (Object)childValue;
-            Object.set(scopes, childParent, (Object)childScope);
-            byte[8] childData = childScope.data;
-            item.result = (Object)childData;
-        }
-        if (item.alias == 0) Object.set(item.scope.data, item.name, item.result);
-        else Object.set(item.scope.data, item.alias, item.result);
         index = index + 1;
     }
-    byte[8] output = rootScope.data;
-    return (Object)output;
-};
+    return data;
+}
+
+function nativeFieldIncluded(nativeDocument, index, variables) {
+    byte[8] count = GraphQL.field_directive_count(nativeDocument, index);
+    byte[8] directiveIndex = 0;
+    while (directiveIndex < count) {
+        byte[8] name = GraphQL.field_directive(
+            nativeDocument, index, directiveIndex, 0);
+        byte[8] variable = GraphQL.field_directive(
+            nativeDocument, index, directiveIndex, 1);
+        if (Object.address(variables,
+                Bytes.dynamic_bytes(variable)) == 0)
+            throw "missing GraphQL directive variable";
+        byte[8] encoded = JSON.stringify(Object.get(variables,
+            Bytes.dynamic_bytes(variable)));
+        byte[1] enabled = Test.byte_equal(
+            Bytes.dynamic_bytes(encoded), "true") != 0;
+        if (Test.byte_equal(Bytes.dynamic_bytes(name), "skip") != 0 &&
+            enabled != 0) return 0;
+        if (Test.byte_equal(Bytes.dynamic_bytes(name), "include") != 0 &&
+            enabled == 0) return 0;
+        directiveIndex = directiveIndex + 1;
+    }
+    return 1;
+}
+
+function resolveNativeSelections(resolvers, nativeDocument, fieldCount, parentIndex, parent, context, variables, failures) {
+    byte[8] data = new Object();
+    byte[8] index = 0;
+    while (index < fieldCount) {
+        if (GraphQL.field_parent(nativeDocument, index) == parentIndex &&
+            nativeFieldIncluded(nativeDocument, index, variables) != 0) {
+            byte[8] item = new {
+                name: GraphQL.field_name(nativeDocument, index, 0),
+                alias: GraphQL.field_name(nativeDocument, index, 1)
+            };
+            byte[8] resolver = Object.get(resolvers, item.name);
+            if (resolver == 0) throw "unknown GraphQL field";
+
+            byte[8] arguments = new Object();
+            byte[8] argumentCount = GraphQL.argument_count(nativeDocument, index);
+            byte[8] argumentIndex = 0;
+            while (argumentIndex < argumentCount) {
+                byte[8] argument = new {
+                    name: GraphQL.argument(nativeDocument, index, argumentIndex, 0),
+                    variableName: GraphQL.argument(nativeDocument, index, argumentIndex, 2),
+                    value: 0
+                };
+                if (argument.variableName == 0)
+                    argument.value = JSON.parse(GraphQL.argument(
+                        nativeDocument, index, argumentIndex, 3));
+                else argument.value = Object.get(variables, argument.variableName);
+                Object.set(arguments, argument.name, argument.value);
+                argumentIndex = argumentIndex + 1;
+            }
+
+            byte[8] info = new { name: item.name, variables: variables };
+            byte[8] work = new { result: 0, failed: 0 };
+            try {
+                work.result = resolver(parent, arguments,
+                    context, info);
+            } catch error {
+                work.result = JSON.nullValue();
+                work.failed = 1;
+                byte[8] failure = executionError(error, item.name);
+                JSON.array_push(failures.items, failure);
+                failures.count = failures.count + 1;
+            }
+
+            byte[8] childParent = index + 1;
+            byte[8] childIndex = 0;
+            byte[1] hasChildren = 0;
+            while (childIndex < fieldCount) {
+                if (GraphQL.field_parent(nativeDocument, childIndex) == childParent)
+                    hasChildren = 1;
+                childIndex = childIndex + 1;
+            }
+            if (hasChildren != 0 && work.failed == 0) {
+                byte[1] isNull = Object.address(
+                    work.result, "nullValue") != 0;
+                byte[1] isList = Object.address(
+                    work.result, "listValues") != 0;
+                if (isNull != 0) {
+                    work.result = JSON.nullValue();
+                } else if (isList != 0) {
+                    byte[8] list = JSON.array();
+                    byte[8] itemIndex = 0;
+                    byte[8] itemCount = JSON.array_length(work.result.listValues);
+                    while (itemIndex < itemCount) {
+                        byte[8] listItem = JSON.array_at(
+                            work.result.listValues, itemIndex);
+                        if (Object.address(listItem, "resolvers") != 0)
+                            JSON.array_push(list,
+                                resolveNativeSelections(listItem.resolvers,
+                                    nativeDocument, fieldCount, childParent,
+                                    listItem.value, context, variables,
+                                    failures));
+                        else JSON.array_push(list,
+                            resolveNativeSelections(
+                                work.result.resolvers, nativeDocument, fieldCount,
+                                childParent, listItem, context, variables,
+                                failures));
+                        itemIndex = itemIndex + 1;
+                    }
+                    work.result = list;
+                } else {
+                    work.result = resolveNativeSelections(work.result.resolvers,
+                        nativeDocument, fieldCount, childParent, work.result.value,
+                        context, variables, failures);
+                }
+            }
+            if (item.alias == 0)
+                setResolvedValue(data, item.name, work.result);
+            else setResolvedValue(data, item.alias, work.result);
+        }
+        index = index + 1;
+    }
+    return data;
+}
+
+async function resolveSelectionsAsync(resolvers, fields, parent, context, variables, failures) {
+    byte[8] data = new Object();
+    byte[8] count = JSON.array_length(fields.items);
+    byte[8] index = 0;
+    while (index < count) {
+        byte[8] field = JSON.array_at(fields.items, index);
+        byte[8] resolver = Object.get(resolvers, field.name);
+        if (resolver == 0) throw "unknown GraphQL field";
+        byte[8] info = new { name: field.name, variables: variables };
+        byte[8] work = new { result: 0, failed: 0 };
+        try {
+            if (isAsyncResolver(resolver) != 0)
+                work.result = await resolver.invoke(parent, field.arguments,
+                    context, info);
+            else work.result = resolver(parent, field.arguments, context,
+                    info);
+        } catch error {
+            work.result = JSON.nullValue();
+            work.failed = 1;
+            JSON.array_push(failures.items,
+                executionError(error, field.name));
+            failures.count = failures.count + 1;
+        }
+        if (field.children != 0 && work.failed == 0)
+            work.result = await resolveSelectionsAsync(work.result.resolvers,
+                field.children, work.result.value, context, variables, failures);
+        if (field.alias == 0)
+            setResolvedValue(data, field.name, work.result);
+        else setResolvedValue(data, field.alias, work.result);
+        index = index + 1;
+    }
+    return data;
+}
+
+async function resolveNativeSelectionsAsync(resolvers, nativeDocument, fieldCount, parentIndex, parent, context, variables, failures) {
+    byte[8] data = new Object();
+    byte[8] index = 0;
+    while (index < fieldCount) {
+        if (GraphQL.field_parent(nativeDocument, index) == parentIndex &&
+            nativeFieldIncluded(nativeDocument, index, variables) != 0) {
+            byte[8] item = new {
+                name: GraphQL.field_name(nativeDocument, index, 0),
+                alias: GraphQL.field_name(nativeDocument, index, 1)
+            };
+            byte[8] resolver = Object.get(resolvers, item.name);
+            if (resolver == 0) throw "unknown GraphQL field";
+
+            byte[8] arguments = new Object();
+            byte[8] argumentCount = GraphQL.argument_count(nativeDocument, index);
+            byte[8] argumentIndex = 0;
+            while (argumentIndex < argumentCount) {
+                byte[8] argument = new {
+                    name: GraphQL.argument(nativeDocument, index, argumentIndex, 0),
+                    variableName: GraphQL.argument(nativeDocument, index, argumentIndex, 2),
+                    value: 0
+                };
+                if (argument.variableName == 0)
+                    argument.value = JSON.parse(GraphQL.argument(
+                        nativeDocument, index, argumentIndex, 3));
+                else argument.value = Object.get(variables, argument.variableName);
+                Object.set(arguments, argument.name, argument.value);
+                argumentIndex = argumentIndex + 1;
+            }
+
+            byte[8] info = new { name: item.name, variables: variables };
+            byte[8] work = new { result: 0, failed: 0 };
+            try {
+                if (isAsyncResolver(resolver) != 0)
+                    work.result = await resolver.invoke(parent,
+                        arguments, context, info);
+                else work.result = resolver(parent, arguments,
+                        context, info);
+            } catch error {
+                work.result = JSON.nullValue();
+                work.failed = 1;
+                JSON.array_push(failures.items,
+                    executionError(error, item.name));
+                failures.count = failures.count + 1;
+            }
+
+            byte[8] childParent = index + 1;
+            byte[8] childIndex = 0;
+            byte[1] hasChildren = 0;
+            while (childIndex < fieldCount) {
+                if (GraphQL.field_parent(nativeDocument, childIndex) == childParent)
+                    hasChildren = 1;
+                childIndex = childIndex + 1;
+            }
+            if (hasChildren != 0 && work.failed == 0) {
+                byte[1] isNull = Object.address(
+                    work.result, "nullValue") != 0;
+                byte[1] isList = Object.address(
+                    work.result, "listValues") != 0;
+                if (isNull != 0) work.result = JSON.nullValue();
+                else if (isList != 0) {
+                    byte[8] list = JSON.array();
+                    byte[8] itemIndex = 0;
+                    byte[8] itemCount = JSON.array_length(work.result.listValues);
+                    while (itemIndex < itemCount) {
+                        byte[8] listItem = JSON.array_at(
+                            work.result.listValues, itemIndex);
+                        byte[8] child = new { value: 0 };
+                        if (Object.address(listItem, "resolvers") != 0)
+                            child.value = await resolveNativeSelectionsAsync(
+                                listItem.resolvers, nativeDocument, fieldCount,
+                                childParent, listItem.value, context, variables,
+                                failures);
+                        else child.value = await resolveNativeSelectionsAsync(
+                                work.result.resolvers, nativeDocument, fieldCount,
+                                childParent, listItem, context, variables,
+                                failures);
+                        JSON.array_push(list, child.value);
+                        itemIndex = itemIndex + 1;
+                    }
+                    work.result = list;
+                } else work.result = await resolveNativeSelectionsAsync(
+                        work.result.resolvers, nativeDocument, fieldCount,
+                        childParent, work.result.value, context, variables,
+                        failures);
+            }
+            if (item.alias == 0)
+                setResolvedValue(data, item.name, work.result);
+            else setResolvedValue(data, item.alias, work.result);
+        }
+        index = index + 1;
+    }
+    return data;
+}
+
+export function resolvedList(values, resolvers) {
+    byte[8] result = new { listValues: 0, resolvers: 0 };
+    Object.set_owned(result, "listValues", values);
+    Object.set(result, "resolvers", resolvers);
+    return result;
+}
+
+export function federation(schema, sdl, resolveEntity) {
+    byte[8] state = new {
+        sdl: sdl,
+        resolveEntity: resolveEntity
+    };
+    byte[8] serviceResolvers = new Object();
+    Object.set(serviceResolvers, "sdl",
+        function(parent, arguments, context, info) {
+            return JSON.string(parent.sdl);
+        });
+    byte[8] serviceState = new {
+        state: state,
+        resolvers: serviceResolvers
+    };
+    schema.query("_service", function(parent, arguments, context, info) {
+        return new {
+            value: serviceState.state,
+            resolvers: serviceState.resolvers
+        };
+    });
+    schema.query("_entities", function(parent, arguments, context, info) {
+        byte[8] representations = arguments.representations;
+        byte[8] values = JSON.array();
+        byte[8] count = JSON.array_length(representations);
+        byte[8] index = 0;
+        while (index < count) {
+            byte[8] resolver = state.resolveEntity;
+            byte[8] representation = JSON.array_at(
+                representations, index);
+            byte[8] entity = resolver(representation, context);
+            JSON.array_push(values, entity);
+            index = index + 1;
+        }
+        byte[8] result = new { listValues: 0, resolvers: new Object() };
+        Object.set_owned(result, "listValues", values);
+        return result;
+    });
+    return schema;
+}
+
 export function execute(schema, document, context) {
-    byte[8] result = new Object();
+    byte[8] result = new { data: 0 };
+    byte[8] failures = new { items: JSON.array(), count: 0 };
     byte[8] resolvers = schema.queryFields;
     if (document.operation == "mutation") resolvers = schema.mutationFields;
     if (document.operation == "subscription") resolvers = schema.subscriptionFields;
     byte[8] data = 0;
     if (document.nativeDocument == 0)
-        data = resolveSelections(resolvers, document.fields, 0, context,
-                                 document.variables);
+        data = resolveSelections(resolvers, document.fields,
+            schema, context, document.variables, failures);
     else {
         byte[32] nativeDocument = document.nativeDocument;
         byte[8] fieldCount = document.fieldCount;
-        data = resolveNativeSelections(resolvers, nativeDocument, fieldCount, 0, 0,
-                                       context, (Object)document.variables);
+        data = resolveNativeSelections(resolvers, nativeDocument,
+            fieldCount, 0, schema, context,
+            document.variables, failures);
     }
-    Object.set_owned((Object)result, "data", (Object)data);
-    return (Object)result;
+    Object.set_owned(result, "data", data);
+    if (failures.count != 0)
+        Object.set_owned(result, "errors", failures.items);
+    return result;
 }
 
-function BatchResult(value) {
-    this.value = value;
-    this.next = 0;
-    return;
-}
-
-function executeBatch(schema, document, context) {
-    if (document == 0) return 0;
-    byte[8] result = new BatchResult(execute(schema, document, context));
-    if (document.next != 0) result.next = executeBatch(schema, (Object)document.next, context);
-    return (Object)result;
+export async function executeAsync(schema, document, context) {
+    byte[8] result = new { data: 0 };
+    byte[8] failures = new { items: JSON.array(), count: 0 };
+    byte[8] resolvers = schema.queryFields;
+    if (document.operation == "mutation") resolvers = schema.mutationFields;
+    if (document.operation == "subscription") resolvers = schema.subscriptionFields;
+    if (document.nativeDocument == 0)
+        result.data = await resolveSelectionsAsync(resolvers, document.fields,
+            schema, context, document.variables, failures);
+    else {
+        byte[32] nativeDocument = document.nativeDocument;
+        byte[8] fieldCount = document.fieldCount;
+        result.data = await resolveNativeSelectionsAsync(resolvers,
+            nativeDocument, fieldCount, 0, schema, context,
+            document.variables, failures);
+    }
+    if (failures.count != 0)
+        Object.set_owned(result, "errors", failures.items);
+    return result;
 }
 
 export function batch(schema, documents, context) {
-    return executeBatch(schema, documents, context);
+    byte[8] results = JSON.array();
+    byte[8] count = JSON.array_length(documents);
+    byte[8] index = 0;
+    while (index < count) {
+        byte[8] document = JSON.array_at(documents, index);
+        JSON.array_push(results,
+            execute(schema, document, context));
+        index = index + 1;
+    }
+    return results;
 }
 
-export function persisted(resolve, key, document) {
-    if (document == 0) return resolve(key, 0);
-    resolve(key, document);
+export function persisted(schema, key, document) {
+    if (document == 0) {
+        if (Object.address(schema.persistedOperations, key) == 0) throw "unknown persisted GraphQL operation";
+        return Object.get(schema.persistedOperations, key);
+    }
+    byte[32] parsed = GraphQL.parse(document, 256, 10000);
+    GraphQL.close(parsed);
+    Object.set_owned(schema.persistedOperations, key, document);
     return document;
-}
-
-export function introspect(schema) {
-    byte[8] result = new Object();
-    result.query = schema.queryFields;
-    result.mutation = schema.mutationFields;
-    result.subscription = schema.subscriptionFields;
-    return (Object)result;
 }
 
 export function limited(maximum, measure, schema, document, context) {
     if (measure(document) > maximum) throw "GraphQL query is too complex";
     return execute(schema, document, context);
+}
+
+function initializeVariableDefaults(document) {
+    byte[8] count = GraphQL.variable_count(document.nativeDocument);
+    byte[8] index = 0;
+    while (index < count) {
+        byte[8] name = GraphQL.variable(document.nativeDocument, index, 0);
+        if (GraphQL.variable_has_default(document.nativeDocument, index) != 0 &&
+            Object.address(document.variables,
+                Bytes.dynamic_bytes(name)) == 0) {
+            byte[8] encoded = GraphQL.variable(
+                document.nativeDocument, index, 2);
+            Object.set_owned(document.variables,
+                Bytes.dynamic_bytes(name),
+                JSON.parse(Bytes.dynamic_bytes(encoded)));
+        }
+        index = index + 1;
+    }
+    return document;
+}
+
+function applyVariableValues(document, variables) {
+    byte[8] count = GraphQL.variable_count(document.nativeDocument);
+    byte[8] index = 0;
+    while (index < count) {
+        byte[8] name = GraphQL.variable(document.nativeDocument, index, 0);
+        if (Object.address(variables,
+                Bytes.dynamic_bytes(name)) != 0)
+            Object.set(document.variables,
+                Bytes.dynamic_bytes(name),
+                Object.get(variables,
+                    Bytes.dynamic_bytes(name)));
+        index = index + 1;
+    }
+    return document;
+}
+
+function variableDefinition(document, name) {
+    byte[8] count = GraphQL.variable_count(document.nativeDocument);
+    byte[8] index = 0;
+    while (index < count) {
+        byte[8] candidate = GraphQL.variable(
+            document.nativeDocument, index, 0);
+        if (Test.byte_equal(Bytes.dynamic_bytes(candidate), name) != 0)
+            return index + 1;
+        index = index + 1;
+    }
+    return 0;
 }
 
 export function parse(source) {
@@ -254,7 +1361,18 @@ export function parse(source) {
     value.nativeDocument = nativeDocument;
     value.operationName = GraphQL.operation_name(nativeDocument);
     value.fieldCount = GraphQL.field_count(nativeDocument);
-    return (Object)value;
+    initializeVariableDefaults(value);
+    return value;
+}
+
+export function parseOperation(source, operationName) {
+    byte[32] nativeDocument = GraphQL.parse_operation(source, operationName);
+    byte[8] value = new ParsedDocument(GraphQL.operation(nativeDocument));
+    value.nativeDocument = nativeDocument;
+    value.operationName = GraphQL.operation_name(nativeDocument);
+    value.fieldCount = GraphQL.field_count(nativeDocument);
+    initializeVariableDefaults(value);
+    return value;
 }
 
 export function close(document) {
@@ -266,50 +1384,338 @@ export function close(document) {
     return 1;
 }
 
-export function validate(schema, document, validator) {
-    return validator(schema, document);
+function validationFailure(message, path) {
+    byte[8] failure = new {
+        message: JSON.string(message),
+        path: JSON.string(path),
+        locations: JSON.nullValue(),
+        extensions: JSON.nullValue()
+    };
+    return failure;
 }
 
-export function subscribe(schema, document, context, publish) {
-    byte[8] result = execute(schema, document, context);
-    return publish(result);
+function namedOutputType(type) {
+    byte[8] current = type;
+    byte[1] wrapped = 1;
+    while (wrapped != 0) {
+        wrapped = 0;
+        if (Test.byte_equal(current.kind, "NON_NULL") != 0 ||
+            Test.byte_equal(current.kind, "LIST") != 0) {
+            current = current.ofType;
+            wrapped = 1;
+        }
+    }
+    return current;
+}
+
+function isIntrospectionField(name) {
+    return Test.byte_equal(name, "__schema") != 0 ||
+        Test.byte_equal(name, "__type") != 0 ||
+        Test.byte_equal(name, "__typename") != 0;
+}
+
+function encodedInputMatchesType(encoded, type) {
+    byte[8] valueKind = GraphQL.value_kind(
+        Bytes.dynamic_bytes(encoded));
+    if (Test.byte_equal(type.kind, "NON_NULL") != 0) {
+        if (Test.byte_equal(Bytes.dynamic_bytes(valueKind), "NULL") != 0)
+            return 0;
+        return encodedInputMatchesType(encoded, type.ofType);
+    }
+    if (Test.byte_equal(Bytes.dynamic_bytes(valueKind), "NULL") != 0)
+        return 1;
+    if (Test.byte_equal(type.kind, "LIST") != 0) {
+        if (Test.byte_equal(Bytes.dynamic_bytes(valueKind), "LIST") != 0) {
+            byte[8] values = JSON.parse(Bytes.dynamic_bytes(encoded));
+            byte[8] count = JSON.array_length(values);
+            byte[8] index = 0;
+            while (index < count) {
+                byte[8] item = JSON.stringify(JSON.array_at(
+                    values, index));
+                if (encodedInputMatchesType(item, type.ofType) == 0)
+                    return 0;
+                index = index + 1;
+            }
+            return 1;
+        }
+        return encodedInputMatchesType(encoded, type.ofType);
+    }
+    if (Test.byte_equal(type.kind, "ENUM") != 0) {
+        if (Test.byte_equal(Bytes.dynamic_bytes(valueKind), "STRING") == 0)
+            return 0;
+        byte[8] index = 0;
+        while (index < type.enumValueCount) {
+            byte[8] enumValue = JSON.array_at(type.enumValues, index);
+            byte[8] candidate = JSON.stringify(enumValue.name);
+            if (Test.byte_equal(Bytes.dynamic_bytes(candidate),
+                    Bytes.dynamic_bytes(encoded)) != 0)
+                return 1;
+            index = index + 1;
+        }
+        return 0;
+    }
+    if (Test.byte_equal(type.kind, "INPUT_OBJECT") != 0) {
+        if (Test.byte_equal(Bytes.dynamic_bytes(valueKind), "OBJECT") == 0)
+            return 0;
+        byte[8] values = JSON.parse(Bytes.dynamic_bytes(encoded));
+        byte[8] index = 0;
+        while (index < type.inputFieldCount) {
+            byte[8] field = JSON.array_at(type.inputFields, index);
+            byte[1] present = Object.address(values, field.name) != 0;
+            byte[1] required = Test.byte_equal(field.type.kind, "NON_NULL") != 0 &&
+                field.hasDefault == 0;
+            if (required != 0 && present == 0) return 0;
+            if (present != 0) {
+                byte[8] item = JSON.stringify(Object.get(values, field.name));
+                if (encodedInputMatchesType(item, field.type) == 0)
+                    return 0;
+            }
+            index = index + 1;
+        }
+        return 1;
+    }
+    if (Test.byte_equal(type.name, "Int") != 0)
+        return Test.byte_equal(Bytes.dynamic_bytes(valueKind), "INTEGER") != 0;
+    if (Test.byte_equal(type.name, "Float") != 0)
+        return Test.byte_equal(Bytes.dynamic_bytes(valueKind), "INTEGER") != 0 ||
+            Test.byte_equal(Bytes.dynamic_bytes(valueKind), "FLOAT") != 0;
+    if (Test.byte_equal(type.name, "Boolean") != 0)
+        return Test.byte_equal(Bytes.dynamic_bytes(valueKind), "BOOLEAN") != 0;
+    if (Test.byte_equal(type.name, "String") != 0)
+        return Test.byte_equal(Bytes.dynamic_bytes(valueKind), "STRING") != 0;
+    if (Test.byte_equal(type.name, "ID") != 0)
+        return Test.byte_equal(Bytes.dynamic_bytes(valueKind), "STRING") != 0 ||
+            Test.byte_equal(Bytes.dynamic_bytes(valueKind), "INTEGER") != 0;
+    return 1;
+}
+
+export function validate(schema, document) {
+    byte[8] validation = new {
+        errors: JSON.array(),
+        count: 0,
+        valid: 0
+    };
+    byte[8] rootType = schema.queryType;
+    if (document.operation == "mutation") rootType = schema.mutationType;
+    if (document.operation == "subscription") rootType = schema.subscriptionType;
+    byte[8] selectedTypes = JSON.array();
+    byte[8] rootFieldCount = 0;
+    byte[8] index = 0;
+    while (index < document.fieldCount) {
+        byte[8] fieldParent = GraphQL.field_parent(
+            document.nativeDocument, index);
+        if (fieldParent == 0) {
+            rootFieldCount = rootFieldCount + 1;
+        }
+        byte[8] item = new {
+            name: GraphQL.field_name(document.nativeDocument, index, 0),
+            parentType: rootType,
+            field: 0,
+            composite: 0,
+            outputType: 0
+        };
+        if (fieldParent != 0) {
+            byte[8] parentSelection = JSON.array_at(
+                selectedTypes, fieldParent - 1);
+            if (parentSelection.value == 0) item.parentType = 0;
+            else Object.set(item, "parentType",
+                parentSelection.value);
+        }
+        if (item.parentType != 0)
+            Object.set(item, "field",
+                Object.get(item.parentType.fieldsByName, item.name));
+        if (item.field == 0 && isIntrospectionField(item.name) == 0 &&
+            item.parentType != 0) {
+            JSON.array_push(validation.errors,
+                validationFailure("unknown GraphQL field", item.name));
+            validation.count = validation.count + 1;
+        }
+
+        byte[8] selectionType = new { value: 0 };
+        if (item.field != 0) {
+            Object.set(item, "outputType",
+                namedOutputType(item.field.type));
+            item.composite = Test.byte_equal(item.outputType.kind, "OBJECT") != 0 ||
+                Test.byte_equal(item.outputType.kind, "INTERFACE") != 0 ||
+                Test.byte_equal(item.outputType.kind, "UNION") != 0;
+            if (item.composite != 0)
+                Object.set(selectionType, "value",
+                    item.outputType);
+        }
+        JSON.array_push(selectedTypes, selectionType);
+
+        byte[8] childIndex = 0;
+        byte[1] hasChildren = 0;
+        while (childIndex < document.fieldCount) {
+            if (GraphQL.field_parent(document.nativeDocument, childIndex) == index + 1)
+                hasChildren = 1;
+            childIndex = childIndex + 1;
+        }
+        if (item.field != 0) {
+            if (item.composite != 0 && hasChildren == 0) {
+                JSON.array_push(validation.errors,
+                    validationFailure("GraphQL composite field requires a selection", item.name));
+                validation.count = validation.count + 1;
+            }
+            if (item.composite == 0 && hasChildren != 0) {
+                JSON.array_push(validation.errors,
+                    validationFailure("GraphQL leaf field cannot have a selection", item.name));
+                validation.count = validation.count + 1;
+            }
+        }
+
+        byte[8] suppliedArguments = new Object();
+        byte[8] argumentCount = GraphQL.argument_count(
+            document.nativeDocument, index);
+        byte[8] argumentIndex = 0;
+        while (argumentIndex < argumentCount) {
+            byte[8] argument = new {
+                name: GraphQL.argument(document.nativeDocument, index,
+                    argumentIndex, 0),
+                variableName: 0,
+                definition: 0
+            };
+            if (Object.address(suppliedArguments, argument.name) != 0) {
+                JSON.array_push(validation.errors,
+                    validationFailure("duplicate GraphQL argument", argument.name));
+                validation.count = validation.count + 1;
+            }
+            Object.set(suppliedArguments, argument.name, byte(01));
+            byte[8] expectedArgument = 0;
+            if (item.field != 0)
+                expectedArgument = Object.get(
+                    item.field.argsByName, argument.name);
+            if (item.field != 0 && expectedArgument == 0) {
+                JSON.array_push(validation.errors,
+                    validationFailure("unknown GraphQL argument", argument.name));
+                validation.count = validation.count + 1;
+            }
+            argument.variableName = GraphQL.argument(
+                document.nativeDocument, index, argumentIndex, 2);
+            if (argument.variableName != 0) {
+                argument.definition = variableDefinition(document,
+                    argument.variableName);
+                if (argument.definition == 0) {
+                    JSON.array_push(validation.errors,
+                        validationFailure("undefined GraphQL variable",
+                            argument.variableName));
+                    validation.count = validation.count + 1;
+                } else if (Object.address(document.variables,
+                        argument.variableName) == 0) {
+                    JSON.array_push(validation.errors,
+                        validationFailure("missing GraphQL variable",
+                            argument.variableName));
+                    validation.count = validation.count + 1;
+                }
+            }
+            byte[8] encodedActual = 0;
+            byte[1] hasValue = 1;
+            if (argument.variableName == 0)
+                encodedActual = Bytes.dynamic(GraphQL.argument(
+                    document.nativeDocument, index, argumentIndex, 3));
+            else if (Object.address(document.variables,
+                    argument.variableName) != 0)
+                encodedActual = JSON.stringify(Object.get(
+                    document.variables, argument.variableName));
+            else hasValue = 0;
+            if (expectedArgument != 0 && hasValue != 0 &&
+                encodedInputMatchesType(encodedActual,
+                    expectedArgument.type) == 0) {
+                JSON.array_push(validation.errors,
+                    validationFailure("invalid GraphQL argument value",
+                        argument.name));
+                validation.count = validation.count + 1;
+            }
+            argumentIndex = argumentIndex + 1;
+        }
+        byte[8] directiveCount = GraphQL.field_directive_count(
+            document.nativeDocument, index);
+        byte[8] directiveIndex = 0;
+        while (directiveIndex < directiveCount) {
+            byte[8] variableName = GraphQL.field_directive(
+                document.nativeDocument, index, directiveIndex, 1);
+            byte[8] definition = variableDefinition(document,
+                Bytes.dynamic_bytes(variableName));
+            if (definition == 0) {
+                JSON.array_push(validation.errors,
+                    validationFailure("undefined GraphQL directive variable",
+                        variableName));
+                validation.count = validation.count + 1;
+            } else if (Object.address(document.variables,
+                    Bytes.dynamic_bytes(variableName)) == 0) {
+                JSON.array_push(validation.errors,
+                    validationFailure("missing GraphQL directive variable",
+                        variableName));
+                validation.count = validation.count + 1;
+            }
+            directiveIndex = directiveIndex + 1;
+        }
+        if (item.field != 0) {
+            byte[8] expectedIndex = 0;
+            while (expectedIndex < item.field.argumentCount) {
+                byte[8] expected = JSON.array_at(
+                    item.field.args, expectedIndex);
+                byte[1] required = Test.byte_equal(
+                    expected.type.kind, "NON_NULL") != 0 &&
+                    expected.hasDefault == 0;
+                if (required != 0 &&
+                    Object.address(suppliedArguments,
+                        expected.name) == 0) {
+                    JSON.array_push(validation.errors,
+                        validationFailure("missing required GraphQL argument",
+                            expected.name));
+                    validation.count = validation.count + 1;
+                }
+                expectedIndex = expectedIndex + 1;
+            }
+        }
+        index = index + 1;
+    }
+    if (document.operation == "subscription" && rootFieldCount != 1) {
+        JSON.array_push(validation.errors,
+            validationFailure("subscription requires exactly one root field", "subscription"));
+        validation.count = validation.count + 1;
+    }
+    validation.valid = validation.count == 0;
+    return validation;
 }
 
 function errorResult(error) {
-    byte[8] result = new Object();
-    byte[8] item = new Object();
+    byte[8] result = new { data: JSON.nullValue() };
+    byte[8] item = new {
+        message: (String)"GraphQL execution failed",
+        path: JSON.nullValue(),
+        locations: JSON.nullValue(),
+        extensions: JSON.nullValue()
+    };
     byte[8] errors = JSON.array();
-    result.data = JSON.nullValue();
-    item.message = (String)"GraphQL execution failed";
-    item.path = JSON.nullValue();
-    item.locations = JSON.nullValue();
-    item.extensions = JSON.nullValue();
     if (isGraphQLError(error) != 0) {
-        item.message = (String)error.message;
+        item.message = error.message;
         item.path = error.path;
         item.locations = error.locations;
         item.extensions = error.extensions;
     }
-    JSON.array_push((Object)errors, (Object)item);
-    Object.set_owned((Object)result, "errors", (Object)errors);
-    return (Object)result;
+    JSON.array_push(errors, item);
+    Object.set_owned(result, "errors", errors);
+    return result;
 }
 
 export function endpoint(schema, decode, encode, createContext) {
-    byte[8] state = new Object();
-    state.schema = schema;
-    state.decode = decode;
-    state.encode = encode;
-    state.createContext = createContext;
-    state.execute = (Function)execute;
-    state.errorResult = (Function)errorResult;
+    byte[8] state = new {
+        schema: schema,
+        decode: decode,
+        encode: encode,
+        createContext: createContext,
+        execute: execute,
+        errorResult: errorResult
+    };
     return function(context) {
         byte[8] document = 0;
         try {
             document = state.decode(context.request);
         } catch transportError {
             byte[8] failure = state.errorResult(transportError);
-            byte[8] encoded = state.encode((Object)failure);
+            byte[8] encoded = state.encode(failure);
             return context.json(encoded, 400);
         }
         try {
@@ -317,53 +1723,417 @@ export function endpoint(schema, decode, encode, createContext) {
             return context.json(state.encode(result), 200);
         } catch error {
             byte[8] failure = state.errorResult(error);
-            byte[8] encoded = state.encode((Object)failure);
+            byte[8] encoded = state.encode(failure);
             return context.json(encoded, 200);
         }
     };
 }
 
 export function handler(schema, createContext) {
-    byte[8] state = new Object();
-    state.schema = schema;
-    state.createContext = createContext;
-    state.execute = (Function)execute;
-    state.errorResult = (Function)errorResult;
-    state.parse = (Function)parse;
-    state.close = (Function)close;
+    byte[8] state = new {
+        schema: schema,
+        createContext: createContext,
+        execute: execute,
+        errorResult: errorResult,
+        parse: parse,
+        parseOperation: parseOperation,
+        close: close,
+        validate: validate,
+        applyVariableValues: applyVariableValues
+    };
     return function(context) {
         byte[8] document = 0;
         try {
             byte[8] envelope = context.request.json();
-            if (Object.address((Object)envelope, "query") == 0)
+            if (Object.address(envelope, "query") == 0)
                 throw "GraphQL request is missing query";
-            document = state.parse(envelope.query);
-            if (Object.address((Object)envelope, "variables") != 0 &&
-                envelope.variables != 0)
-                document.variables = envelope.variables;
-            if (Object.address((Object)envelope, "operationName") != 0 &&
-                envelope.operationName != 0 &&
-                document.operationName != envelope.operationName) {
-                state.close((Object)document);
-                document = 0;
-                throw "GraphQL operationName does not match the document";
+            byte[8] query = JSON.property_bytes(envelope, "query");
+            if (Object.address(envelope, "operationName") != 0 &&
+                Object.get(envelope, "operationName") != 0) {
+                byte[8] requestedOperation = JSON.property_bytes(
+                    envelope, "operationName");
+                document = state.parseOperation(query,
+                    requestedOperation);
+            } else document = state.parse(query);
+            if (Object.address(envelope, "variables") != 0 &&
+                Object.get(envelope, "variables") != 0)
+                state.applyVariableValues(document,
+                    Object.get(envelope, "variables"));
+            if (Object.address(envelope, "operationName") != 0 &&
+                Object.get(envelope, "operationName") != 0) {
+                byte[8] requestedOperation = JSON.property_bytes(
+                    envelope, "operationName");
+                if (Test.byte_equal(document.operationName,
+                        Bytes.dynamic_bytes(requestedOperation)) == 0) {
+                    state.close(document);
+                    document = 0;
+                    throw "GraphQL operationName does not match the document";
+                }
             }
         } catch transportError {
-            if (document != 0) state.close((Object)document);
+            if (document != 0) state.close(document);
             byte[8] failure = state.errorResult(transportError);
-            return context.json((Object)failure, 400);
+            return context.json(failure, 400);
         }
         try {
             byte[8] executionContext = state.createContext(context);
-            byte[8] result = state.execute(state.schema, (Object)document, executionContext);
-            state.close((Object)document);
-            return context.json((Object)result, 200);
+            byte[8] validateDocument = state.validate;
+            byte[8] validation = validateDocument(state.schema, document);
+            if (validation.valid == 0) {
+                byte[8] failure = new { data: JSON.nullValue() };
+                Object.set_owned(failure, "errors", validation.errors);
+                state.close(document);
+                return context.json(failure, 400);
+            }
+            byte[8] result = state.execute(state.schema, document, executionContext);
+            state.close(document);
+            return context.json(result, 200);
         } catch error {
-            state.close((Object)document);
+            state.close(document);
             byte[8] failure = state.errorResult(error);
-            return context.json((Object)failure, 200);
+            return context.json(failure, 200);
         }
     };
+}
+
+export function handlerAsync(schema, createContext) {
+    byte[8] state = new {
+        schema: schema,
+        createContext: createContext,
+        executeAsync: executeAsync,
+        errorResult: errorResult,
+        parse: parse,
+        parseOperation: parseOperation,
+        close: close,
+        validate: validate,
+        applyVariableValues: applyVariableValues
+    };
+    return async function(context) {
+        byte[8] document = 0;
+        try {
+            byte[8] envelope = context.request.json();
+            if (Object.address(envelope, "query") == 0)
+                throw "GraphQL request is missing query";
+            byte[8] query = JSON.property_bytes(envelope, "query");
+            if (Object.address(envelope, "operationName") != 0 &&
+                Object.get(envelope, "operationName") != 0) {
+                byte[8] requestedOperation = JSON.property_bytes(
+                    envelope, "operationName");
+                document = state.parseOperation(query,
+                    requestedOperation);
+            } else document = state.parse(query);
+            if (Object.address(envelope, "variables") != 0 &&
+                Object.get(envelope, "variables") != 0)
+                state.applyVariableValues(document,
+                    Object.get(envelope, "variables"));
+        } catch transportError {
+            if (document != 0) state.close(document);
+            byte[8] failure = state.errorResult(transportError);
+            return context.json(failure, 400);
+        }
+        try {
+            byte[8] validation = state.validate(state.schema,
+                document);
+            if (validation.valid == 0) {
+                byte[8] failure = new { data: JSON.nullValue() };
+                Object.set_owned(failure, "errors", validation.errors);
+                state.close(document);
+                return context.json(failure, 400);
+            }
+            byte[8] execution = new { result: 0 };
+            execution.result = await state.executeAsync(state.schema,
+                document, state.createContext(context));
+            state.close(document);
+            return context.json(execution.result, 200);
+        } catch error {
+            state.close(document);
+            byte[8] failure = state.errorResult(error);
+            return context.json(failure, 200);
+        }
+    };
+}
+
+function SubscriptionSession(schema, context) {
+    Object.set_owned(this, "schema", schema);
+    Object.set_owned(this, "context", context);
+    this.operations = 0;
+    this.initialized = 0;
+    this.maximumInFlight = 16;
+    return;
+}
+
+function subscriptionOperation(session, id) {
+    byte[8] target = Bytes.dynamic(id);
+    if (Object.is_object(id) != 0) target = id;
+    byte[8] operation = session.operations;
+    while (operation != 0) {
+        if (operation.active != 0 && Test.byte_equal(
+                Bytes.dynamic_bytes(operation.id),
+                Bytes.dynamic_bytes(target)) != 0)
+            return operation;
+        operation = operation.next;
+    }
+    return 0;
+}
+
+export function subscriptionSession(schema, context) {
+    return new SubscriptionSession(schema, context);
+}
+
+export function subscriptionBackpressure(session, maximumInFlight) {
+    if (maximumInFlight == 0)
+        throw "GraphQL subscription capacity must be positive";
+    session.maximumInFlight = maximumInFlight;
+    return session;
+}
+
+function subscriptionEnvelope(type, id) {
+    byte[8] envelope = new { type: type };
+    if (id != 0) envelope.id = id;
+    return envelope;
+}
+
+export function subscriptionReceive(session, message) {
+    byte[8] envelope = JSON.parse(message);
+    byte[8] type = JSON.property_bytes(envelope, "type");
+    if (Test.byte_equal(Bytes.dynamic_bytes(type), "connection_init") != 0) {
+        if (session.initialized != 0) throw "GraphQL subscription is already initialized";
+        session.initialized = 1;
+        return subscriptionEnvelope("connection_ack", 0);
+    }
+    if (Test.byte_equal(Bytes.dynamic_bytes(type), "ping") != 0)
+        return subscriptionEnvelope("pong", 0);
+    if (session.initialized == 0) throw "GraphQL subscription is not initialized";
+    if (Test.byte_equal(Bytes.dynamic_bytes(type), "subscribe") != 0) {
+        byte[8] id = JSON.property_bytes(envelope, "id");
+        if (subscriptionOperation(session, id) != 0)
+            throw "GraphQL subscription id is already active";
+        byte[8] payload = Object.get(envelope, "payload");
+        byte[8] query = JSON.property_bytes(payload, "query");
+        byte[8] operationName = 0;
+        if (Object.address(payload, "operationName") != 0 &&
+            Object.get(payload, "operationName") != 0)
+            operationName = JSON.property_bytes(payload, "operationName");
+        byte[8] document = 0;
+        if (operationName == 0) document = parse(query);
+        else document = parseOperation(query, operationName);
+        if (document.operation != "subscription") {
+            close(document);
+            throw "GraphQL subscription message requires a subscription operation";
+        }
+        if (Object.address(payload, "variables") != 0 &&
+            Object.get(payload, "variables") != 0)
+            applyVariableValues(document,
+                Object.get(payload, "variables"));
+        byte[8] validation = validate(session.schema, document);
+        if (validation.valid == 0) {
+            close(document);
+            throw "GraphQL subscription validation failed";
+        }
+        close(document);
+        byte[8] operation = new {
+            id: 0,
+            query: 0,
+            operationName: 0,
+            variables: 0,
+            active: 1,
+            inFlight: 0,
+            next: 0
+        };
+        byte[8] ownedId = Bytes.dynamic(Bytes.dynamic_bytes(id));
+        byte[8] ownedQuery = Bytes.dynamic(Bytes.dynamic_bytes(query));
+        Object.set_owned(operation, "id", ownedId);
+        Object.set_owned(operation, "query", ownedQuery);
+        if (operationName != 0) {
+            byte[8] ownedOperationName = Bytes.dynamic(
+                Bytes.dynamic_bytes(operationName));
+            Object.set_owned(operation, "operationName",
+                ownedOperationName);
+        }
+        if (Object.address(payload, "variables") != 0 &&
+            Object.get(payload, "variables") != 0) {
+            byte[8] variables = Object.get(payload, "variables");
+            byte[8] encodedVariables = JSON.stringify(variables);
+            byte[8] ownedVariables = JSON.parse(
+                Bytes.dynamic_bytes(encodedVariables));
+            Object.set_owned(operation, "variables", ownedVariables);
+        }
+        if (session.operations != 0)
+            Object.set_owned(operation, "next", session.operations);
+        Object.set_owned(session, "operations", operation);
+        return 0;
+    }
+    if (Test.byte_equal(Bytes.dynamic_bytes(type), "complete") != 0) {
+        byte[8] id = JSON.property_bytes(envelope, "id");
+        byte[8] operation = subscriptionOperation(session, id);
+        if (operation != 0) operation.active = 0;
+        return 0;
+    }
+    throw "unsupported GraphQL subscription message";
+}
+
+export function subscriptionNext(session, id) {
+    byte[8] operation = subscriptionOperation(session, id);
+    if (operation == 0 || operation.active == 0)
+        throw "unknown GraphQL subscription id";
+    if (operation.inFlight >= session.maximumInFlight)
+        throw "GraphQL subscription backpressure limit reached";
+    byte[8] document = 0;
+    if (operation.operationName == 0)
+        document = parse(operation.query);
+    else document = parseOperation(operation.query,
+        operation.operationName);
+    if (operation.variables != 0)
+        applyVariableValues(document, operation.variables);
+    byte[8] result = execute(session.schema, document, session.context);
+    close(document);
+    byte[8] envelope = new {
+        type: (String)"next",
+        id: id,
+        payload: 0
+    };
+    Object.set_owned(envelope, "payload", result);
+    operation.inFlight = operation.inFlight + 1;
+    return envelope;
+}
+
+export async function subscriptionNextAsync(session, id) {
+    byte[8] operation = subscriptionOperation(session, id);
+    if (operation == 0 || operation.active == 0)
+        throw "unknown GraphQL subscription id";
+    if (operation.inFlight >= session.maximumInFlight)
+        throw "GraphQL subscription backpressure limit reached";
+    byte[8] document = 0;
+    if (operation.operationName == 0)
+        document = parse(operation.query);
+    else document = parseOperation(operation.query,
+        operation.operationName);
+    if (operation.variables != 0)
+        applyVariableValues(document, operation.variables);
+    byte[8] envelope = new {
+        type: (String)"next",
+        id: id,
+        payload: 0
+    };
+    try {
+        envelope.payload = await executeAsync(session.schema, document,
+            session.context);
+    } finally {
+        close(document);
+    }
+    operation.inFlight = operation.inFlight + 1;
+    return envelope;
+}
+
+export function subscriptionConsume(session, id) {
+    byte[8] operation = subscriptionOperation(session, id);
+    if (operation == 0 || operation.active == 0)
+        throw "unknown GraphQL subscription id";
+    if (operation.inFlight == 0)
+        throw "GraphQL subscription has no in-flight event";
+    operation.inFlight = operation.inFlight - 1;
+    return operation.inFlight;
+}
+
+export function subscriptionPublish(session) {
+    byte[8] operation = session.operations;
+    if (operation == 0 || operation.active == 0)
+        throw "no active GraphQL subscription";
+    byte[8] document = 0;
+    if (operation.operationName == 0)
+        document = parse(operation.query);
+    else document = parseOperation(operation.query,
+        operation.operationName);
+    if (operation.variables != 0)
+        applyVariableValues(document, operation.variables);
+    byte[8] result = execute(session.schema, document, session.context);
+    close(document);
+    return result;
+}
+
+export async function subscriptionPublishAsync(session) {
+    byte[8] operation = session.operations;
+    if (operation == 0 || operation.active == 0)
+        throw "no active GraphQL subscription";
+    byte[8] document = 0;
+    if (operation.operationName == 0)
+        document = parse(operation.query);
+    else document = parseOperation(operation.query,
+        operation.operationName);
+    if (operation.variables != 0)
+        applyVariableValues(document, operation.variables);
+    byte[8] result = new { value: 0 };
+    try {
+        result.value = await executeAsync(session.schema, document,
+            session.context);
+    } finally {
+        close(document);
+    }
+    return result.value;
+}
+
+export function subscriptionFinish(session, id) {
+    byte[8] operation = subscriptionOperation(session, id);
+    if (operation == 0 || operation.active == 0)
+        throw "unknown GraphQL subscription id";
+    operation.active = 0;
+    return subscriptionEnvelope("complete", id);
+}
+
+export function subscriptionClose(session) {
+    byte[8] operation = session.operations;
+    if (operation == 0 || operation.active == 0)
+        throw "no active GraphQL subscription";
+    operation.active = 0;
+    return 1;
+}
+
+export function subscriptionExecuteMessage(session, message) {
+    if (session.initialized == 0)
+        throw "GraphQL subscription is not initialized";
+    byte[8] envelope = JSON.parse(message);
+    byte[8] id = JSON.property_bytes(envelope, "id");
+    byte[8] payload = Object.get(envelope, "payload");
+    byte[8] query = JSON.property_bytes(payload, "query");
+    byte[8] document = 0;
+    if (Object.address(payload, "operationName") != 0 &&
+        Object.get(payload, "operationName") != 0) {
+        byte[8] operationName = JSON.property_bytes(
+            payload, "operationName");
+        document = parseOperation(query, operationName);
+    } else document = parse(query);
+    if (document.operation != "subscription") {
+        close(document);
+        throw "GraphQL subscription message requires a subscription operation";
+    }
+    if (Object.address(payload, "variables") != 0 &&
+        Object.get(payload, "variables") != 0)
+        applyVariableValues(document,
+            Object.get(payload, "variables"));
+    byte[8] validation = validate(session.schema, document);
+    if (validation.valid == 0) {
+        close(document);
+        throw "GraphQL subscription validation failed";
+    }
+    byte[8] result = execute(session.schema, document, session.context);
+    close(document);
+    byte[8] next = new {
+        type: (String)"next",
+        id: JSON.string(Bytes.dynamic_bytes(id)),
+        payload: 0
+    };
+    Object.set_owned(next, "payload", result);
+    return next;
+}
+
+export function subscriptionCompleteMessage(message) {
+    byte[8] envelope = JSON.parse(message);
+    byte[8] id = JSON.property_bytes(envelope, "id");
+    byte[8] complete = new {
+        type: (String)"complete",
+        id: JSON.string(Bytes.dynamic_bytes(id))
+    };
+    return complete;
 }
 
 test "executes query aliases and arguments" {
@@ -371,15 +2141,88 @@ test "executes query aliases and arguments" {
     byte[8] greeting = function(parent, arguments, context, info) {
         return arguments.value;
     };
-    root.query("greeting", (Function)greeting);
-    byte[8] arguments = new Object();
-    arguments.value = 42;
-    byte[8] fields = selection("greeting", "welcome", (Object)arguments, 0);
-    byte[8] variables = new Object();
-    byte[8] query = document("query", (Object)fields, (Object)variables);
-    byte[8] result = execute((Object)root, (Object)query, 0);
+    root.query("greeting", greeting);
+    byte[8] arguments = new { value: 42 };
+    byte[8] fields = selection("greeting", "welcome", arguments, 0);
+    byte[8] variables = new {};
+    byte[8] query = document("query", fields, variables);
+    byte[8] result = execute(root, query, 0);
     byte[8] value = result.data.welcome;
     if (value != 42) throw "GraphQL query result differs";
+}
+
+test "awaits asynchronous resolvers and nested selections" {
+    byte[8] root = schema();
+    root.query("profile", asyncResolver(
+        async function(parent, arguments, context, info) {
+            return new {
+                value: context.profile,
+                resolvers: context.profileResolvers
+            };
+        }));
+    byte[8] profileResolvers = new Object();
+    Object.set(profileResolvers, "name",
+        function(parent, arguments, context, info) {
+            return JSON.string(parent.name);
+        });
+    byte[8] context = new {
+        profile: new { name: (String)"Ada" },
+        profileResolvers: profileResolvers
+    };
+    byte[8] parsed = parse("{ profile { name } }");
+    byte[32] task = executeAsync(root, parsed,
+        context);
+    byte[8] result = 0;
+    try {
+        result = Async.block_on(task);
+    } finally {
+        Async.close(task);
+        close(parsed);
+    }
+    byte[8] encoded = JSON.stringify(result.data.profile.name);
+    if (Test.byte_equal(Bytes.dynamic_bytes(encoded), "\"Ada\"") == 0)
+        throw "async GraphQL nested result differs";
+}
+
+test "maps asynchronous resolver failures into partial errors" {
+    byte[8] root = schema();
+    root.query("ready", function(parent, arguments, context, info) {
+        return JSON.string("yes");
+    });
+    root.query("failure", asyncResolver(
+        async function(parent, arguments, context, info) {
+            throw "resolver failed";
+        }));
+    byte[8] parsed = parse("{ ready failure }");
+    byte[32] task = executeAsync(root, parsed, new {});
+    byte[8] result = 0;
+    try {
+        result = Async.block_on(task);
+    } finally {
+        Async.close(task);
+        close(parsed);
+    }
+    if (JSON.array_length(result.errors) != 1)
+        throw "async GraphQL error count differs";
+    byte[8] encoded = JSON.stringify(result.data.ready);
+    if (Test.byte_equal(Bytes.dynamic_bytes(encoded), "\"yes\"") == 0)
+        throw "async GraphQL sibling result differs";
+}
+
+test "stores programmatic selections in ordered arrays" {
+    byte[8] arguments = new { value: 42 };
+    byte[8] fields = selection("greeting", "welcome", arguments, 0);
+    if (JSON.array_length(fields.items) != 1)
+        throw "programmatic selection count differs";
+}
+
+test "preserves programmatic selection values" {
+    byte[8] arguments = new { value: 42 };
+    byte[8] fields = selection("greeting", "welcome", arguments, 0);
+    byte[8] field = JSON.array_at(fields.items, 0);
+    if (field.name != "greeting" || field.alias != "welcome" ||
+        field.arguments.value != 42)
+        throw "programmatic selection value differs";
 }
 
 test "preserves variable width resolver results" {
@@ -387,10 +2230,10 @@ test "preserves variable width resolver results" {
     byte[8] resolver = function(parent, arguments, context, info) {
         return "GraphQL result longer than eight bytes";
     };
-    root.query("longResult", (Function)resolver);
-    byte[8] fields = selection("longResult", 0, new Object(), 0);
-    byte[8] query = document("query", (Object)fields, new Object());
-    byte[8] result = execute((Object)root, (Object)query, 0);
+    root.query("longResult", resolver);
+    byte[8] fields = selection("longResult", 0, new {}, 0);
+    byte[8] query = document("query", fields, new {});
+    byte[8] result = execute(root, query, 0);
     if (result.data.longResult != "GraphQL result longer than eight bytes") {
         throw "variable width GraphQL result differs";
     }
@@ -399,10 +2242,10 @@ test "preserves variable width resolver results" {
 test "executes mutations separately from queries" {
     byte[8] root = schema();
     byte[8] update = function(parent, arguments, context, info) { return 42; };
-    root.mutation("update", (Function)update);
-    byte[8] fields = selection("update", 0, new Object(), 0);
-    byte[8] mutation = document("mutation", (Object)fields, new Object());
-    byte[8] result = execute((Object)root, (Object)mutation, 0);
+    root.mutation("update", update);
+    byte[8] fields = selection("update", 0, new {}, 0);
+    byte[8] mutation = document("mutation", fields, new {});
+    byte[8] result = execute(root, mutation, 0);
     byte[8] value = result.data.update;
     if (value != 42) throw "GraphQL mutation result differs";
 }
@@ -410,10 +2253,10 @@ test "executes mutations separately from queries" {
 test "executes subscription roots" {
     byte[8] root = schema();
     byte[8] updates = function(parent, arguments, context, info) { return "stream"; };
-    root.subscription("updates", (Function)updates);
-    byte[8] fields = selection("updates", 0, new Object(), 0);
-    byte[8] subscription = document("subscription", (Object)fields, new Object());
-    byte[8] result = execute((Object)root, (Object)subscription, 0);
+    root.subscription("updates", updates);
+    byte[8] fields = selection("updates", 0, new {}, 0);
+    byte[8] subscription = document("subscription", fields, new {});
+    byte[8] result = execute(root, subscription, 0);
     if (result.data.updates != "stream") throw "GraphQL subscription result differs";
 }
 
@@ -423,18 +2266,79 @@ test "parses native GraphQL documents" {
         return arguments.id;
     };
     byte[8] status = function(parent, arguments, context, info) {
-        if (arguments.limit != "2") throw "parsed GraphQL resolver argument differs";
+        if (Bytes.dynamic_bytes(JSON.stringify(arguments.limit)) != "2")
+            throw "parsed GraphQL resolver argument differs";
         return "ready";
     };
-    root.query("account", (Function)account);
-    root.query("status", (Function)status);
+    root.query("account", account);
+    root.query("status", status);
     byte[8] parsed = parse("query User($id: ID!) { user: account(id: $id) state: status(limit: 2) }");
     parsed.variables.id = "user-7";
     if (parsed.variables.id != "user-7") throw "GraphQL variable storage differs";
-    byte[8] result = execute((Object)root, (Object)parsed, 0);
+    byte[8] result = execute(root, parsed, 0);
     if (result.data.user != "user-7") throw "GraphQL variable argument differs";
     if (result.data.state != "ready") throw "second parsed GraphQL field differs";
-    close((Object)parsed);
+    close(parsed);
+}
+
+test "selects named operations from multi-operation documents" {
+    byte[8] root = schema();
+    root.query("first",
+        function(parent, arguments, context, info) { return "one"; });
+    root.query("second",
+        function(parent, arguments, context, info) { return "two"; });
+    byte[8] parsed = parseOperation(
+        "query One { first } query Two { second } fragment Extra on Query { first }",
+        "Two");
+    byte[8] result = execute(root, parsed, new {});
+    if (result.data.second != "two" ||
+        Object.address(result.data, "first") != 0)
+        throw "GraphQL named operation selection differs";
+    close(parsed);
+}
+
+test "evaluates variable include and skip directives" {
+    byte[8] root = schema();
+    root.query("visible",
+        function(parent, arguments, context, info) { return "yes"; });
+    root.query("hidden",
+        function(parent, arguments, context, info) { return "no"; });
+    byte[8] parsed = parse(
+        "query Conditional($show: Boolean!) { visible @include(if: $show) hidden @skip(if: $show) }");
+    parsed.variables.show = JSON.boolean(1);
+    if (GraphQL.field_directive_count(parsed.nativeDocument, 0) != 1)
+        throw "GraphQL directive count differs";
+    byte[8] variableName = GraphQL.field_directive(
+        parsed.nativeDocument, 0, 0, 1);
+    if (Test.byte_equal(Bytes.dynamic_bytes(variableName), "show") == 0)
+        throw "GraphQL directive variable metadata differs";
+    if (Object.address(parsed.variables,
+            Bytes.dynamic_bytes(variableName)) == 0)
+        throw "GraphQL directive variable lookup differs";
+    byte[8] shown = execute(root, parsed, new {});
+    if (shown.data.visible != "yes" ||
+        Object.address(shown.data, "hidden") != 0)
+        throw "GraphQL true directive variable differs";
+    close(parsed);
+
+    parsed = parse(
+        "query Conditional($show: Boolean!) { visible @include(if: $show) hidden @skip(if: $show) }");
+    parsed.variables.show = JSON.boolean(0);
+    byte[8] hidden = execute(root, parsed, new {});
+    if (hidden.data.hidden != "no" ||
+        Object.address(hidden.data, "visible") != 0)
+        throw "GraphQL false directive variable differs";
+    close(parsed);
+
+    parsed = parse(
+        "query Conditional($show: Boolean!) { ... on Query @include(if: $show) { visible } ...Visible @skip(if: $show) } fragment Visible on Query { hidden }");
+    parsed.variables.show = JSON.boolean(1);
+    shown = execute(root, parsed, new {});
+    if (shown.data.visible != "yes" ||
+        Object.address(shown.data, "hidden") != 0)
+        throw "GraphQL fragment directive variable differs";
+    close(parsed);
+
 }
 
 test "executes parsed nested GraphQL selections" {
@@ -443,74 +2347,636 @@ test "executes parsed nested GraphQL selections" {
     byte[8] name = function(parent, arguments, context, info) { return "Alex"; };
     byte[8] city = function(parent, arguments, context, info) { return "Shanghai"; };
     byte[8] contactFields = new Object();
-    Object.set(contactFields, "city", (Function)city);
-    byte[8] contactObject = new Object();
-    contactObject.value = new Object();
-    contactObject.resolvers = (Object)contactFields;
-    byte[8] contact = function(parent, arguments, context, info) {
-        return (Object)contactObject;
+    Object.set(contactFields, "city", city);
+    byte[8] contactObject = new {
+        value: new {},
+        resolvers: contactFields
     };
-    Object.set(fields, "name", (Function)name);
-    Object.set(fields, "contact", (Function)contact);
-    byte[8] nested = new Object();
-    nested.value = new Object();
-    nested.resolvers = (Object)fields;
-    byte[8] profile = function(parent, arguments, context, info) { return (Object)nested; };
+    byte[8] contact = function(parent, arguments, context, info) {
+        return contactObject;
+    };
+    Object.set(fields, "name", name);
+    Object.set(fields, "contact", contact);
+    byte[8] nested = new { value: new {}, resolvers: fields };
+    byte[8] profile = function(parent, arguments, context, info) { return nested; };
     byte[8] status = function(parent, arguments, context, info) { return "ready"; };
-    root.query("profile", (Function)profile);
-    root.query("status", (Function)status);
+    root.query("profile", profile);
+    root.query("status", status);
     byte[8] parsed = parse("{ profile { display: name contact { city } } state: status }");
-    byte[8] result = execute((Object)root, (Object)parsed, 0);
+    byte[8] result = execute(root, parsed, 0);
     if (result.data.profile.display != "Alex") throw "nested GraphQL alias differs";
     if (result.data.profile.contact.city != "Shanghai") throw "deep GraphQL field differs";
     if (result.data.state != "ready") throw "nested GraphQL sibling differs";
-    close((Object)parsed);
+    close(parsed);
+}
+
+test "executes nested GraphQL list selections" {
+    byte[8] root = schema();
+    byte[8] userResolvers = new Object();
+    Object.set(userResolvers, "name", function(parent, arguments, context, info) {
+        return parent.name;
+    });
+    byte[8] users = function(parent, arguments, context, info) {
+        byte[8] values = JSON.array();
+        JSON.array_push(values, new { name: JSON.string("Ada") });
+        JSON.array_push(values, new { name: JSON.string("Linus") });
+        byte[8] result = new { listValues: 0, resolvers: 0 };
+        Object.set_owned(result, "listValues", values);
+        Object.set(result, "resolvers", context.userResolvers);
+        return result;
+    };
+    root.query("users", users);
+    byte[8] parsed = parse("{ users { name } }");
+    byte[8] context = new { userResolvers: userResolvers };
+    byte[8] result = execute(root, parsed, context);
+    byte[8] first = JSON.array_at(result.data.users, 0);
+    byte[8] second = JSON.array_at(result.data.users, 1);
+    byte[8] firstName = JSON.stringify(first.name);
+    byte[8] secondName = JSON.stringify(second.name);
+    if (Test.byte_equal(Bytes.dynamic_bytes(firstName), "\"Ada\"") == 0 ||
+        Test.byte_equal(Bytes.dynamic_bytes(secondName), "\"Linus\"") == 0)
+        throw "nested GraphQL list result differs";
+    close(parsed);
+}
+
+test "executes Apollo Federation service and entity fields" {
+    byte[8] root = schema();
+    byte[8] entityResolvers = new Object();
+    Object.set(entityResolvers, "upc",
+        function(parent, arguments, context, info) { return parent.upc; });
+    byte[8] resolveEntity = function(representation, context) {
+        return new {
+            value: representation,
+            resolvers: context.entityResolvers
+        };
+    };
+    federation(root,
+        "type Product @key(fields: \"upc\") { upc: String! }",
+        resolveEntity);
+    byte[8] context = new { entityResolvers: entityResolvers };
+
+    byte[8] serviceDocument = parse("{ _service { sdl } }");
+    byte[8] serviceResult = execute(
+        root, serviceDocument, context);
+    byte[8] sdl = JSON.stringify(serviceResult.data._service.sdl);
+    if (Test.byte_equal(Bytes.dynamic_bytes(sdl),
+            "\"type Product @key(fields: \\\"upc\\\") { upc: String! }\"") == 0)
+        throw "Federation service SDL differs";
+    close(serviceDocument);
+
+    byte[8] entityDocument = parse(
+        "{ _entities(representations: [{ __typename: \"Product\", upc: \"1\" }]) { ... on Product { upc } } }");
+    byte[8] entityResult = execute(
+        root, entityDocument, context);
+    byte[8] first = JSON.array_at(entityResult.data._entities, 0);
+    byte[8] upc = JSON.stringify(first.upc);
+    if (Test.byte_equal(Bytes.dynamic_bytes(upc), "\"1\"") == 0)
+        throw "Federation entity result differs";
+    close(entityDocument);
+}
+
+test "executes standard GraphQL introspection selections" {
+    byte[8] root = schema();
+    root.query("hello",
+        function(parent, arguments, context, info) { return JSON.string("world"); });
+    byte[8] parsed = parse(
+        "{ __schema { queryType { kind name fields { name args { name } type { kind name ofType { kind name } } isDeprecated deprecationReason } } mutationType { kind name } subscriptionType { kind name } types { kind name } directives { name } } __type(name: \"Query\") { kind name } }");
+    byte[8] result = execute(root, parsed, new {});
+    byte[8] queryName = JSON.stringify(result.data.__schema.queryType.name);
+    if (Test.byte_equal(Bytes.dynamic_bytes(queryName), "\"Query\"") == 0)
+        throw "GraphQL introspection query type differs";
+    byte[8] firstField = JSON.array_at(
+        result.data.__schema.queryType.fields, 0);
+    byte[8] fieldName = JSON.stringify(firstField.name);
+    if (Test.byte_equal(Bytes.dynamic_bytes(fieldName), "\"hello\"") == 0)
+        throw "GraphQL introspection field differs";
+    byte[8] firstType = JSON.array_at(result.data.__schema.types, 0);
+    byte[8] typeKind = JSON.stringify(firstType.kind);
+    if (Test.byte_equal(Bytes.dynamic_bytes(typeKind), "\"OBJECT\"") == 0)
+        throw "GraphQL introspection type kind differs";
+    byte[8] namedType = JSON.stringify(result.data.__type.name);
+    if (Test.byte_equal(Bytes.dynamic_bytes(namedType), "\"Query\"") == 0)
+        throw "GraphQL named type introspection differs";
+    close(parsed);
+}
+
+test "introspects typed object list and argument definitions" {
+    byte[8] root = schema();
+    byte[8] userType = root.objectType("User");
+    byte[8] stringType = root.namedType("String");
+    byte[8] requiredString = root.nonNullType(stringType);
+    root.field(userType, "name", requiredString,
+        function(parent, arguments, context, info) { return parent.name; });
+    byte[8] userList = root.listType(userType);
+    byte[8] usersField = root.typedQuery("users", userList,
+        function(parent, arguments, context, info) {
+            byte[8] values = JSON.array();
+            JSON.array_push(values,
+                new { name: JSON.string("Ada") });
+            byte[8] list = new { listValues: 0, resolvers: 0 };
+            Object.set_owned(list, "listValues", values);
+            Object.set(list, "resolvers", context.userResolvers);
+            return list;
+        });
+    root.argument(usersField, "limit", root.namedType("Int"),
+        JSON.nullValue());
+    byte[8] context = new { userResolvers: userType.resolvers };
+
+    byte[8] parsed = parse(
+        "{ users(limit: 1) { name } __type(name: \"User\") { kind name fields { name type { kind name ofType { kind name } } } } }");
+    byte[8] result = execute(root, parsed, context);
+    byte[8] first = JSON.array_at(result.data.users, 0);
+    byte[8] userName = JSON.stringify(first.name);
+    if (Test.byte_equal(Bytes.dynamic_bytes(userName), "\"Ada\"") == 0)
+        throw "typed GraphQL list execution differs";
+    byte[8] typeName = JSON.stringify(result.data.__type.name);
+    if (Test.byte_equal(Bytes.dynamic_bytes(typeName), "\"User\"") == 0)
+        throw "typed GraphQL named type differs";
+    byte[8] nameField = JSON.array_at(result.data.__type.fields, 0);
+    byte[8] fieldKind = JSON.stringify(nameField.type.kind);
+    if (Test.byte_equal(Bytes.dynamic_bytes(fieldKind), "\"NON_NULL\"") == 0)
+        throw "typed GraphQL field reference differs";
+    close(parsed);
+}
+
+test "introspects interfaces unions enums inputs and directives" {
+    byte[8] root = schema();
+    byte[8] stringType = root.namedType("String");
+    byte[8] idType = root.nonNullType(root.namedType("ID"));
+    byte[8] nodeType = root.interfaceType("Node");
+    root.field(nodeType, "id", idType,
+        function(parent, arguments, context, info) { return parent.id; });
+    byte[8] userType = root.objectType("User");
+    root.field(userType, "id", idType,
+        function(parent, arguments, context, info) { return parent.id; });
+    root.implements(userType, nodeType);
+
+    byte[8] searchType = root.unionType("SearchResult");
+    root.possibleType(searchType, userType);
+    root.possibleType(nodeType, userType);
+
+    byte[8] roleType = root.enumType("Role");
+    root.enumValue(roleType, "ADMIN");
+    root.enumValue(roleType, "USER");
+    byte[8] filterType = root.inputObjectType("UserFilter");
+    root.inputField(filterType, "name", stringType,
+        JSON.nullValue());
+
+    byte[8] locations = JSON.array();
+    JSON.array_push(locations, JSON.string("QUERY"));
+    JSON.array_push(locations, JSON.string("FIELD"));
+    byte[8] directive = root.directive("trace", locations, 1);
+    root.argument(directive, "enabled",
+        root.namedType("Boolean"), JSON.boolean(1));
+
+    byte[8] parsed = parse(
+        "{ role: __type(name: \"Role\") { enumValues { name } } filter: __type(name: \"UserFilter\") { inputFields { name type { kind name } } } }");
+    byte[8] result = execute(root, parsed, new {});
+    if (JSON.array_length(result.data.role.enumValues) != 2)
+        throw "GraphQL enum introspection differs";
+    byte[8] input = JSON.array_at(result.data.filter.inputFields, 0);
+    byte[8] inputName = JSON.stringify(input.name);
+    if (Test.byte_equal(Bytes.dynamic_bytes(inputName), "\"name\"") == 0)
+        throw "GraphQL input introspection differs";
+    close(parsed);
+
+    parsed = parse(
+        "{ node: __type(name: \"Node\") { possibleTypes { name } } search: __type(name: \"SearchResult\") { possibleTypes { name } } user: __type(name: \"User\") { interfaces { name } } }");
+    result = execute(root, parsed, new {});
+    if (JSON.array_length(result.data.node.possibleTypes) != 1 ||
+        JSON.array_length(result.data.search.possibleTypes) != 1 ||
+        JSON.array_length(result.data.user.interfaces) != 1)
+        throw "GraphQL abstract type introspection differs";
+    close(parsed);
+
+    parsed = parse(
+        "{ __schema { directives { name isRepeatable locations args { name defaultValue } } } }");
+    result = execute(root, parsed, new {});
+    byte[8] trace = JSON.array_at(result.data.__schema.directives, 0);
+    byte[8] repeatableValue = JSON.stringify(trace.isRepeatable);
+    if (JSON.array_length(result.data.__schema.directives) != 1 ||
+        Test.byte_equal(Bytes.dynamic_bytes(repeatableValue), "true") == 0 ||
+        JSON.array_length(trace.locations) != 2 ||
+        JSON.array_length(trace.args) != 1)
+        throw "GraphQL directive introspection differs";
+    byte[8] directiveArgument = JSON.array_at(trace.args, 0);
+    byte[8] directiveDefault = JSON.stringify(directiveArgument.defaultValue);
+    if (Test.byte_equal(Bytes.dynamic_bytes(directiveDefault), "\"true\"") == 0)
+        throw "GraphQL directive default value introspection differs";
+    close(parsed);
+}
+
+test "builds executable typed schemas from GraphQL SDL" {
+    byte[8] queryResolvers = new Object();
+    Object.set(queryResolvers, "hello",
+        function(parent, arguments, context, info) { return JSON.string("world"); });
+    byte[8] resolvers = new Object();
+    Object.set(resolvers, "Root", queryResolvers);
+    byte[8] root = sdl(
+        "schema { query: Root } type Root { hello: String! users(limit: Int = 2): [User!]! } type User implements Node { id: ID! role: Role! } interface Node { id: ID! } enum Role { ADMIN USER } input UserFilter { name: String } union SearchResult = User directive @trace repeatable on QUERY | FIELD",
+        resolvers);
+    byte[8] parsed = parse(
+        "{ hello __schema { queryType { name } directives { name isRepeatable } } user: __type(name: \"User\") { interfaces { name } } search: __type(name: \"SearchResult\") { possibleTypes { name } } role: __type(name: \"Role\") { enumValues { name } } filter: __type(name: \"UserFilter\") { inputFields { name } } }");
+    byte[8] result = execute(root, parsed, new {});
+    byte[8] hello = JSON.stringify(result.data.hello);
+    if (Test.byte_equal(Bytes.dynamic_bytes(hello), "\"world\"") == 0)
+        throw "GraphQL SDL execution differs";
+    byte[8] rootName = JSON.stringify(result.data.__schema.queryType.name);
+    if (Test.byte_equal(Bytes.dynamic_bytes(rootName), "\"Root\"") == 0)
+        throw "GraphQL SDL root operation differs";
+    if (JSON.array_length(result.data.user.interfaces) != 1 ||
+        JSON.array_length(result.data.search.possibleTypes) != 1 ||
+        JSON.array_length(result.data.role.enumValues) != 2 ||
+        JSON.array_length(result.data.filter.inputFields) != 1 ||
+        JSON.array_length(result.data.__schema.directives) != 1)
+        throw "GraphQL SDL type system differs";
+    close(parsed);
 }
 
 test "maps resolver failures into GraphQL errors" {
     byte[8] root = schema();
     byte[8] resolver = function(parent, arguments, context, info) { throw "failure"; };
-    root.query("failure", (Function)resolver);
-    byte[8] createContext = function(context) { return new Object(); };
-    byte[8] endpoint = handler((Object)root, (Function)createContext);
+    root.query("failure", resolver);
+    byte[8] createContext = function(context) { return new {}; };
+    byte[8] endpoint = handler(root, createContext);
     byte[8] app = web.create();
-    app.post("/graphql", (Function)endpoint);
+    app.post("/graphql", endpoint);
     byte[8] request = web.request("POST", "/graphql", "{\"query\":\"{ failure }\"}");
     request.withHeader("content-type", "application/json");
-    byte[8] response = app.fetch((Object)request);
+    byte[8] response = app.fetch(request);
     byte[8] payload = JSON.parse(response.body);
-    byte[8] failure = Object.get((Object)payload.errors, "0");
+    byte[8] failure = Object.get(payload.errors, "0");
     byte[8] message = JSON.stringify(failure.message);
-    if (Test.byte_equal(Bytes.dynamic_bytes((Object)message),
+    if (Test.byte_equal(Bytes.dynamic_bytes(message),
             "\"GraphQL execution failed\"") == 0)
         throw "GraphQL error boundary payload differs";
 }
 
+test "validates root fields variables and subscription shape" {
+    byte[8] root = schema();
+    byte[8] intType = root.namedType("Int");
+    byte[8] requiredInt = root.nonNullType(intType);
+    byte[8] knownField = root.typedQuery("known", intType,
+        function(parent, arguments, context, info) { return 1; });
+    root.argument(knownField, "value", requiredInt,
+        JSON.nullValue());
+    root.subscription("updates",
+        function(parent, arguments, context, info) { return 1; });
+
+    byte[8] unknown = parse("{ missing }");
+    byte[8] unknownValidation = validate(root, unknown);
+    if (unknownValidation.valid != 0 || unknownValidation.count != 1)
+        throw "unknown GraphQL field validation differs";
+    close(unknown);
+
+    byte[8] undefinedVariable = parse("{ known(value: $value) }");
+    undefinedVariable.variables.value = JSON.number(1);
+    byte[8] undefinedValidation = validate(
+        root, undefinedVariable);
+    if (undefinedValidation.valid != 0 || undefinedValidation.count != 1)
+        throw "undefined GraphQL variable validation differs";
+    close(undefinedVariable);
+
+    byte[8] missingVariable = parse("query($value: Int!) { known(value: $value) }");
+    byte[8] variableValidation = validate(
+        root, missingVariable);
+    if (variableValidation.valid != 0 || variableValidation.count != 1)
+        throw "GraphQL variable validation differs";
+    close(missingVariable);
+
+    byte[8] multipleRoots = parse("subscription { updates second: updates }");
+    byte[8] subscriptionValidation = validate(
+        root, multipleRoots);
+    if (subscriptionValidation.valid != 0 || subscriptionValidation.count != 1)
+        throw "GraphQL subscription root validation differs";
+    close(multipleRoots);
+
+    byte[8] userType = root.objectType("User");
+    root.field(userType, "name", root.namedType("String"),
+        function(parent, arguments, context, info) { return parent.name; });
+    root.typedQuery("profile", userType,
+        function(parent, arguments, context, info) { return new {}; });
+
+    byte[8] nestedUnknown = parse("{ profile { missing } }");
+    byte[8] nestedValidation = validate(
+        root, nestedUnknown);
+    if (nestedValidation.valid != 0 || nestedValidation.count != 1)
+        throw "nested GraphQL field validation differs";
+    close(nestedUnknown);
+
+    byte[8] missingSelection = parse("{ profile }");
+    byte[8] selectionValidation = validate(
+        root, missingSelection);
+    if (selectionValidation.valid != 0 || selectionValidation.count != 1)
+        throw "GraphQL composite selection validation differs";
+    close(missingSelection);
+
+    byte[8] leafSelection = parse("{ known(value: 1) { child } }");
+    byte[8] leafValidation = validate(root, leafSelection);
+    if (leafValidation.valid != 0 || leafValidation.count != 1)
+        throw "GraphQL leaf selection validation differs";
+    close(leafSelection);
+
+    byte[8] missingArgument = parse("{ known }");
+    byte[8] argumentValidation = validate(
+        root, missingArgument);
+    if (argumentValidation.valid != 0 || argumentValidation.count != 1)
+        throw "required GraphQL argument validation differs";
+    close(missingArgument);
+
+}
+
+test "validates GraphQL literal and variable coercion" {
+    byte[8] root = schema();
+    byte[8] field = root.typedQuery("known",
+        root.namedType("Int"),
+        function(parent, arguments, context, info) { return arguments.value; });
+    root.argument(field, "value",
+        root.nonNullType(root.namedType("Int")),
+        JSON.nullValue());
+    byte[8] integerKind = GraphQL.value_kind("1");
+    if (Test.byte_equal(Bytes.dynamic_bytes(integerKind), "INTEGER") == 0)
+        throw "GraphQL integer value kind differs";
+    byte[8] expected = JSON.array_at(field.args, 0);
+    byte[8] encodedInteger = JSON.stringify(JSON.parse("1"));
+    byte[8] encodedKind = GraphQL.value_kind(
+        Bytes.dynamic_bytes(encodedInteger));
+    if (Test.byte_equal(Bytes.dynamic_bytes(encodedKind), "INTEGER") == 0)
+        throw "GraphQL encoded integer value kind differs";
+    if (encodedInputMatchesType(encodedInteger,
+            expected.type.ofType) == 0)
+        throw "GraphQL valid integer coercion differs";
+
+    byte[8] invalidLiteral = parse("{ known(value: \"wrong\") }");
+    byte[8] literalValidation = validate(
+        root, invalidLiteral);
+    if (literalValidation.valid != 0 || literalValidation.count != 1)
+        throw "GraphQL literal coercion validation differs";
+    close(invalidLiteral);
+
+    byte[8] invalidVariable = parse(
+        "query($value: Int!) { known(value: $value) }");
+    invalidVariable.variables.value = JSON.string("wrong");
+    byte[8] coercionValidation = validate(
+        root, invalidVariable);
+    if (coercionValidation.valid != 0 || coercionValidation.count != 1)
+        throw "GraphQL variable coercion validation differs";
+    close(invalidVariable);
+
+    byte[8] listField = root.typedQuery("many",
+        root.namedType("Int"),
+        function(parent, arguments, context, info) { return 1; });
+    root.argument(listField, "values",
+        root.listType(root.nonNullType(
+            root.namedType("Int"))), JSON.nullValue());
+    byte[8] validList = parse("{ many(values: [1, 2]) }");
+    byte[8] validListResult = validate(root, validList);
+    if (validListResult.valid == 0)
+        throw "GraphQL valid list coercion differs";
+    close(validList);
+    byte[8] invalidList = parse("{ many(values: [1, \"wrong\"]) }");
+    byte[8] invalidListResult = validate(root, invalidList);
+    if (invalidListResult.valid != 0 || invalidListResult.count != 1)
+        throw "GraphQL list item coercion differs";
+    close(invalidList);
+
+    byte[8] roleType = root.enumType("Role");
+    root.enumValue(roleType, "ADMIN");
+    root.enumValue(roleType, "USER");
+    byte[8] roleField = root.typedQuery("role",
+        root.namedType("String"),
+        function(parent, arguments, context, info) { return "ok"; });
+    root.argument(roleField, "value", roleType,
+        JSON.nullValue());
+    byte[8] invalidEnum = parse("{ role(value: OTHER) }");
+    byte[8] invalidEnumResult = validate(root, invalidEnum);
+    if (invalidEnumResult.valid != 0 || invalidEnumResult.count != 1)
+        throw "GraphQL enum coercion differs";
+    close(invalidEnum);
+
+    byte[8] filterType = root.inputObjectType("Filter");
+    root.inputField(filterType, "name",
+        root.nonNullType(root.namedType("String")),
+        JSON.nullValue());
+    byte[8] filterField = root.typedQuery("filter",
+        root.namedType("String"),
+        function(parent, arguments, context, info) { return "ok"; });
+    root.argument(filterField, "value", filterType,
+        JSON.nullValue());
+    byte[8] invalidInput = parse("{ filter(value: { name: 7 }) }");
+    byte[8] invalidInputResult = validate(root, invalidInput);
+    if (invalidInputResult.valid != 0 || invalidInputResult.count != 1)
+        throw "GraphQL input object coercion differs";
+    close(invalidInput);
+}
+
+test "applies GraphQL variable defaults" {
+    byte[8] root = schema();
+    byte[8] field = root.typedQuery("echo",
+        root.namedType("Int"),
+        function(parent, arguments, context, info) { return arguments.value; });
+    root.argument(field, "value",
+        root.namedType("Int"), JSON.nullValue());
+    byte[8] parsed = parse(
+        "query DefaultValue($value: Int = 7) { echo(value: $value) }");
+    if (GraphQL.variable_count(parsed.nativeDocument) != 1 ||
+        GraphQL.variable_has_default(parsed.nativeDocument, 0) == 0)
+        throw "GraphQL variable definition metadata differs";
+    byte[8] validation = validate(root, parsed);
+    if (validation.valid == 0)
+        throw "GraphQL default variable validation differs";
+    byte[8] result = execute(root, parsed, new {});
+    byte[8] value = JSON.stringify(result.data.echo);
+    if (Test.byte_equal(Bytes.dynamic_bytes(value), "7") == 0)
+        throw "GraphQL default variable execution differs";
+    close(parsed);
+
+    parsed = parse(
+        "query Override($value: Int = 7) { echo(value: $value) }");
+    byte[8] supplied = new { value: JSON.number(11) };
+    applyVariableValues(parsed, supplied);
+    result = execute(root, parsed, new {});
+    value = JSON.stringify(result.data.echo);
+    if (Test.byte_equal(Bytes.dynamic_bytes(value), "11") == 0)
+        throw "GraphQL supplied variable override differs";
+    close(parsed);
+}
+
 test "serializes default GraphQL errors" {
     byte[8] result = errorResult("failure");
-    byte[8] encoded = JSON.stringify((Object)result);
-    byte[8] decoded = JSON.parse(Bytes.dynamic_bytes((Object)encoded));
-    if (Object.address((Object)decoded, "errors") == 0)
+    byte[8] encoded = JSON.stringify(result);
+    byte[8] decoded = JSON.parse(Bytes.dynamic_bytes(encoded));
+    if (Object.address(decoded, "errors") == 0)
         throw "default GraphQL error envelope lost errors";
 }
 
+test "maps GraphQL HTTP request phases to standard statuses" {
+    byte[8] root = schema();
+    root.query("ok", function(parent, arguments, context, info) {
+        return JSON.string("ok");
+    });
+    root.query("failure", function(parent, arguments, context, info) {
+        throw "failure";
+    });
+    byte[8] createContext = function(context) { return new {}; };
+    byte[8] serve = handler(root, createContext);
+    byte[8] encodeResponse = function(payload, status) {
+        return new { payload: payload, status: status };
+    };
+
+    byte[8] malformedEnvelope = new {};
+    byte[8] malformedRequest = function() { return malformedEnvelope; };
+    byte[8] malformedContext = new {
+        request: new { json: malformedRequest },
+        json: encodeResponse
+    };
+    byte[8] malformed = serve(malformedContext);
+    if (malformed.status != 400)
+        throw "GraphQL malformed HTTP status differs";
+
+    byte[8] invalidEnvelope = new { query: JSON.string("{ missing }") };
+    byte[8] invalidRequest = function() { return invalidEnvelope; };
+    byte[8] invalidContext = new {
+        request: new { json: invalidRequest },
+        json: encodeResponse
+    };
+    byte[8] invalid = serve(invalidContext);
+    if (invalid.status != 400)
+        throw "GraphQL validation HTTP status differs";
+
+    byte[8] failureEnvelope = new { query: JSON.string("{ failure }") };
+    byte[8] failureRequest = function() { return failureEnvelope; };
+    byte[8] failureContext = new {
+        request: new { json: failureRequest },
+        json: encodeResponse
+    };
+    byte[8] executionFailure = serve(failureContext);
+    if (executionFailure.status != 200)
+        throw "GraphQL execution HTTP status differs";
+}
+
+test "executes asynchronous resolvers through HTTP" {
+    byte[8] root = schema();
+    root.query("ready", asyncResolver(
+        async function(parent, arguments, context, info) {
+            return JSON.string("yes");
+        }));
+    byte[8] createContext = function(context) { return new {}; };
+    byte[8] serve = handlerAsync(root, createContext);
+    byte[8] envelope = new { query: JSON.string("{ ready }") };
+    byte[8] request = function() { return envelope; };
+    byte[8] encodeResponse = function(payload, status) {
+        return new { payload: payload, status: status };
+    };
+    byte[8] context = new {
+        request: new { json: request },
+        json: encodeResponse
+    };
+    byte[32] task = serve(context);
+    byte[8] response = 0;
+    try {
+        response = Async.block_on(task);
+    } finally {
+        Async.close(task);
+    }
+    if (response.status != 200)
+        throw "async GraphQL HTTP status differs";
+    byte[8] encoded = JSON.stringify(response.payload.data.ready);
+    if (Test.byte_equal(Bytes.dynamic_bytes(encoded), "\"yes\"") == 0)
+        throw "async GraphQL HTTP payload differs";
+}
+
 test "preserves formal GraphQL error fields" {
-    byte[8] failure = error("denied", (String)"failure", (Number)12, new Object());
-    byte[8] result = errorResult((Object)failure);
-    byte[8] encoded = JSON.stringify((Object)result);
-    byte[8] decoded = JSON.parse(Bytes.dynamic_bytes((Object)encoded));
-    if (Object.address((Object)decoded, "errors") == 0)
+    byte[8] failure = error("denied", (String)"failure", (Number)12, new {});
+    byte[8] result = errorResult(failure);
+    byte[8] encoded = JSON.stringify(result);
+    byte[8] decoded = JSON.parse(Bytes.dynamic_bytes(encoded));
+    if (Object.address(decoded, "errors") == 0)
         throw "formal GraphQL error envelope lost errors";
-    byte[8] item = Object.get((Object)decoded.errors, "0");
+    byte[8] item = Object.get(decoded.errors, "0");
     byte[8] message = JSON.stringify(item.message);
     byte[8] path = JSON.stringify(item.path);
     byte[8] locations = JSON.stringify(item.locations);
-    if (Test.byte_equal(Bytes.dynamic_bytes((Object)message), "\"denied\"") == 0)
+    if (Test.byte_equal(Bytes.dynamic_bytes(message), "\"denied\"") == 0)
         throw "formal GraphQL serialization lost message";
-    if (Test.byte_equal(Bytes.dynamic_bytes((Object)path), "\"failure\"") == 0)
+    if (Test.byte_equal(Bytes.dynamic_bytes(path), "\"failure\"") == 0)
         throw "formal GraphQL serialization lost path";
-    if (Test.byte_equal(Bytes.dynamic_bytes((Object)locations), "12") == 0)
+    if (Test.byte_equal(Bytes.dynamic_bytes(locations), "12") == 0)
         throw "formal GraphQL serialization lost locations";
     if (Object.is_object(item.extensions) == 0)
         throw "formal GraphQL serialization lost extensions";
+}
+
+test "implements graphql-transport-ws subscription lifecycle" {
+    byte[8] root = schema();
+    byte[8] updates = function(parent, arguments, context, info) {
+        return JSON.string("published");
+    };
+    root.subscription("updates", updates);
+    byte[8] session = subscriptionSession(root, new {});
+    byte[8] ack = subscriptionReceive(session,
+        "{\"type\":\"connection_init\"}");
+    if (ack.type != "connection_ack")
+        throw "GraphQL subscription acknowledgement differs";
+    subscriptionReceive(session,
+        "{\"id\":\"c73e49c2-1761-460d-b497-5aee2f486205\",\"type\":\"subscribe\",\"payload\":{\"query\":\"subscription { updates }\"}}");
+    byte[8] next = subscriptionNext(session,
+        "c73e49c2-1761-460d-b497-5aee2f486205");
+    byte[8] encodedNext = JSON.stringify(next);
+    byte[8] decodedNext = JSON.parse(Bytes.dynamic_bytes(encodedNext));
+    byte[8] updateValue = JSON.stringify(next.payload.data.updates);
+    if (next.type != "next" || decodedNext.type == 0 || Test.byte_equal(
+            Bytes.dynamic_bytes(updateValue), "\"published\"") == 0)
+        throw "GraphQL subscription next message differs";
+    byte[8] complete = subscriptionFinish(session,
+        "c73e49c2-1761-460d-b497-5aee2f486205");
+    if (complete.type != "complete")
+        throw "GraphQL subscription completion differs";
+}
+
+test "streams subscriptions with bounded backpressure" {
+    byte[8] root = schema();
+    root.subscription("updates", asyncResolver(
+        async function(parent, arguments, context, info) {
+            return JSON.string("event");
+        }));
+    byte[8] session = subscriptionSession(root, new {});
+    subscriptionBackpressure(session, 2);
+    subscriptionReceive(session,
+        "{\"type\":\"connection_init\"}");
+    subscriptionReceive(session,
+        "{\"id\":\"stream\",\"type\":\"subscribe\",\"payload\":{\"query\":\"subscription { updates }\"}}");
+    byte[32] firstTask = subscriptionNextAsync(session, "stream");
+    byte[32] secondTask = 0;
+    try {
+        byte[8] first = Async.block_on(firstTask);
+        if (first.type != "next") throw "first subscription event differs";
+    } finally {
+        Async.close(firstTask);
+    }
+    secondTask = subscriptionNextAsync(session, "stream");
+    try {
+        byte[8] second = Async.block_on(secondTask);
+        if (second.type != "next") throw "second subscription event differs";
+    } finally {
+        Async.close(secondTask);
+    }
+    byte[1] blocked = 0;
+    try {
+        byte[32] blockedTask = subscriptionNextAsync(session, "stream");
+        try { Async.block_on(blockedTask); }
+        finally { Async.close(blockedTask); }
+    } catch error {
+        blocked = 1;
+    }
+    if (blocked == 0) throw "subscription backpressure did not block";
+    subscriptionConsume(session, "stream");
+    byte[32] resumedTask = subscriptionNextAsync(session, "stream");
+    try {
+        byte[8] resumed = Async.block_on(resumedTask);
+        if (resumed.type != "next") throw "resumed subscription event differs";
+    } finally {
+        Async.close(resumedTask);
+    }
+    subscriptionFinish(session, "stream");
 }

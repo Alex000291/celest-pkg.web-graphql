@@ -1,7 +1,7 @@
 [package]
 name = "web-graphql"
-version = "0.1.0"
+version = "1.0.0"
 entry = "src/main.celest"
 
 [dependencies]
-web-core = { version = "0.1.0", path = "../web-core" }
+web-core = { version = "^1.0.0", path = "../web-core" }
